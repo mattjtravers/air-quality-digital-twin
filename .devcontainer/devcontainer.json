@@ -1,0 +1,34 @@
+{
+   "name": "Wildfire Smoke Digital Twin",
+   "features": {
+      "ghcr.io/jsburckhardt/devcontainer-features/uv:1": {},
+      "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+      "ghcr.io/devcontainers/features/aws-cli:1": {
+         "version": "latest"
+      }
+   },
+   "customizations": {
+      "vscode": {
+         "extensions": [
+            "ms-python.python",
+            "ms-python.debugpy",
+            "charliermarsh.ruff",
+            "anthropic.claude-code",
+            "qgis.qgis-vscode"
+         ],
+         "settings": {
+            "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+            "[python]": {
+               "editor.formatOnSave": true,
+               "editor.defaultFormatter": "charliermarsh.ruff",
+               "editor.codeActionsOnSave": {
+                  "source.organizeImports.ruff": "always",
+                  "source.fixAll.ruff": "always"
+               }
+            },
+            "claudeCode.preferredLocation": "sidebar"
+         }
+      }
+   },
+   "postCreateCommand": "bash .devcontainer/post-create.sh"
+}
