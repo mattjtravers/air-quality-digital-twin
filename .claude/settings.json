@@ -1,8 +1,7 @@
 {
   "enabledPlugins": {
     "linked-intent-dev@jszmajda-lid": true,
-    "arrow-maintenance@jszmajda-lid": true,
-    "lid-experimental@jszmajda-lid": true
+    "arrow-maintenance@jszmajda-lid": true
   },
   "permissions": {
     "allow": [
