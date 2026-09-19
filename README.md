@@ -1,1 +1,1 @@
-# wildfire-smoke-digital-twin
+# air-quality-digital-twin
