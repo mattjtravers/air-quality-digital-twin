@@ -4,14 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This repository is an early-stage scaffold for an air quality digital twin. There is no
-application source code yet — only project tooling (dependency management, linting, CI, tests
-directory with a placeholder). Do not assume any modules, packages, or architecture exist beyond
-what's described below; check the current file tree before making claims about structure.
+An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost sensors fused with
+EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
+incrementally as weekly assignments; each increment lands as a coherent, tested step.
+
+**Design is ahead of code.** The HLD (`docs/high-level-design.md`) and three leaf LLDs under
+`docs/intent/` — `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`) —
+are drafted. EARS specs, tests, and application code for those segments do not exist yet; the
+only test is a placeholder. Check the file tree before claiming any module exists. Read the HLD
+first, then the LLD for the segment being touched; the LLDs are the source of truth for schemas,
+API contracts, QC rules, and package layout (planned: `src/aqdt/` with `observation_store/`,
+`purpleair/`, `airnow/`; tests mirror it under `tests/`).
+
+Key architectural facts to keep in mind (rationale in the HLD):
+
+- Runs are idempotent, time-windowed batch — no resident daemon, no orchestrator yet.
+- The GeoParquet archive in S3 is the system of record; PostGIS (docker-compose sidecar in the
+  Codespace) is a rebuildable cache. The Codespace and everything in it is disposable.
+- QC flags, never drops. Raw values and the raw source record are always preserved.
+- Pydantic validates records and API payloads; Pandera validates dataframes.
+- All configuration is environment variables (Codespaces secrets), never files in the repo. See
+  the `observation-store` LLD § Environment for the variable list.
 
 The devcontainer installs GDAL (`gdal-bin`, `libgdal-dev`) and `libspatialindex-dev`, and VS Code
-is configured with the QGIS extension — geospatial/raster-vector processing is intended but not
-yet implemented.
+is configured with the QGIS extension. The PostGIS sidecar and the S3 archive described in the
+LLDs are not yet wired into the devcontainer or CI.
 
 ## Commands
 
@@ -39,7 +56,8 @@ CI (`.github/workflows/ci.yaml`) runs `uv sync --all-groups`, `uv run ruff check
 `uv run pytest` on every push/PR to `main` — match this locally before pushing.
 
 Python requirement: `>=3.11`. Ruff config: line length 100, rule sets `E`, `F`, `I` (see
-`pyproject.toml`).
+`pyproject.toml`). No runtime dependencies are declared yet; add them in `pyproject.toml` via
+`uv add` as the implementation phases require them.
 
 ## LID
 - Mode: Full

@@ -41,7 +41,8 @@ correction; their value is the reference. Like every ingester, it flags rather t
 The response is a JSON array of row objects, one per site per hour per parameter. Field
 semantics:
 
-- `UTC` — the hour the value is for, `YYYY-MM-DDTHH:MM`, UTC.
+- `UTC` — the hour the value is for, `YYYY-MM-DDTHH:MM`, UTC. Downstream alignment with
+  PurpleAir snapshots assumes this labels the *start* of the averaging hour; see Deferred #4.
 - `Parameter` — `PM2.5` for the rows requested.
 - `Value` — the hourly concentration in `Unit` (`UG/M3`). `-999` is AirNow's missing-value
   sentinel.
@@ -214,6 +215,11 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 2. Whether `RawConcentration` (AirNow's pre-processing value) should be promoted to a schema
    column if calibration prefers it to `Value`. It is in `raw` meanwhile.
 3. Persisting boundary rejections (shared with the observation store's open question).
+4. Confirm against the AirNow API documentation whether `UTC` labels the start or the end of the
+   hour the value averages. Calibration aligns PurpleAir snapshots to `[UTC, UTC + 1 h)` on the
+   start-of-hour assumption; if it is end-of-hour, `observed_at` should be set to `UTC − 1 h` at
+   the boundary so the canonical timestamp is always the hour start. Must be settled before
+   `observed_at` mapping is coded.
 
 ## References
 

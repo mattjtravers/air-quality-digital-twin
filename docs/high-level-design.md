@@ -208,8 +208,9 @@ EARS prefix.
 | `observation-store` | `OBS` | canonical schemas, flag vocabulary, archive layout, PostGIS load |
 | `purpleair-ingest` | `PA` | PurpleAir client, parsing, A/B agreement and humidity QC |
 | `airnow-ingest` | `AN` | AirNow client, parsing, flatline and site-identifier QC |
+| `calibration` | `CAL` | hourly aggregation, distance-aware sensor-to-monitor matching, per-sensor fits (designed; a later increment) |
 
-Later increments add leaves (`calibration`, `fusion`, `transport`, `evaluation`) beside these.
+Later increments add leaves (`fusion`, `transport`, `evaluation`) beside these.
 
 ## Key Design Decisions
 

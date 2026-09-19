@@ -11,7 +11,13 @@ The observation store is the one place where point observations from every sourc
 owns the canonical `Site` and `Observation` schemas, the QC flag vocabulary all ingesters share, the
 GeoParquet archive that is the system of record, and the load of that archive into PostGIS for
 spatial query and GIS tooling. Source ingesters produce validated `Observation` and `Site` records
-and hand them to the store; nothing else writes to the archive or to PostGIS.
+and hand them to the store; nothing else writes observations or sites.
+
+The store also owns the *mechanics* of partitioned GeoParquet writing and PostGIS upserting, and
+exposes them as primitives so that downstream components (calibration, fusion) write their derived
+products with the same determinism, atomicity, and validation guarantees under their own archive
+prefixes and tables. Those components own their products' schemas; the store owns how any product
+lands on disk and in the database.
 
 Guiding principles, in order of precedence when they conflict:
 
@@ -211,6 +217,22 @@ Serializing runs is the caller's responsibility (today: one process; later: the 
 
 An empty record set writes nothing and touches no files.
 
+### Partition primitives for derived products
+
+`write_observations` and `write_sites` are thin wrappers over two primitives that any component
+may use for its own products:
+
+- `write_partitioned(frame, archive_uri, prefix, partition_cols, key_cols, frame_model)` —
+  validates `frame` against `frame_model`, groups by `partition_cols`, and for each partition
+  performs the read-merge-write described above on `key_cols`, writing one object per partition
+  under `{archive_uri}/{prefix}/`. Returns the partition URIs touched.
+- `read_partitioned(archive_uri, prefix, frame_model, **partition_filters)` — reads the matching
+  partitions and returns a validated frame.
+
+Both carry the same guarantees as the observation writes: deterministic bytes for identical
+input, one atomic object per partition, single writer per partition, validation on the way in
+and out.
+
 ### Read semantics
 
 `read_observations(archive_uri, source=None, start=None, end=None)` returns a validated
@@ -267,6 +289,12 @@ The schema lives as ordered SQL files under `src/aqdt/observation_store/sql/` an
 - `rebuild(conn, archive_uri)` truncates both tables and loads every partition. This is the
   one-command recovery the HLD requires and what `postCreateCommand` runs, so a brand-new
   Codespace comes up populated from S3.
+- `upsert_frame(conn, table, frame, key_cols)` is the primitive under `load_archive`, exposed so
+  downstream components load their own products into their own tables with the same
+  `insert ... on conflict do update` semantics and one transaction per call. Each component owns
+  its tables' SQL files; `apply_schema` applies every component's files in order.
+- `rebuild` reloads every component's products, not only observations, so PostGIS is fully
+  rebuildable from the archive regardless of how many derived layers exist.
 - Connection is `DATABASE_URL` from the environment (docker-compose default in the Codespace).
 
 ### Environment
@@ -328,6 +356,7 @@ tests/
 | PostGIS access | `psycopg` with explicit SQL | GeoPandas `to_postgis` (SQLAlchemy + GeoAlchemy2); an ORM | Upsert semantics need `on conflict`; explicit SQL keeps the dependency set to one driver and the schema in plain files a DBA can read. |
 | Schema migrations | Ordered SQL files, idempotent `create if not exists` | Alembic | Two tables and no ORM; a migration framework is more tooling than schema. Revisit when a destructive change is needed. |
 | GeoParquet writer | GeoPandas `to_parquet` | PyArrow directly with hand-written GeoParquet metadata | GeoPandas writes standards-compliant GeoParquet metadata and is already the read tool of choice. |
+| Write mechanics for derived products | Store exposes `write_partitioned` / `read_partitioned` / `upsert_frame`; products own their schemas and tables | Each downstream component implements its own writer; store owns every product's schema | One implementation of determinism, atomicity, and validation is easier to get right and keep right than one per component; owning downstream schemas here would make the store a bottleneck for every later layer's design. |
 | Import package name | `aqdt`, `src/` layout | `air_quality_digital_twin`; flat layout | Short name for a package imported everywhere; `src/` layout keeps tests running against the installed package, not the working directory. |
 
 ## Open Questions & Future Decisions
