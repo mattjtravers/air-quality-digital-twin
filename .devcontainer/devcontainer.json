@@ -1,5 +1,5 @@
 {
-   "name": "Wildfire Smoke Digital Twin",
+   "name": "Air Quality Digital Twin",
    "features": {
       "ghcr.io/jsburckhardt/devcontainer-features/uv:1": {},
       "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
