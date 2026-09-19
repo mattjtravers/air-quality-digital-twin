@@ -89,6 +89,28 @@ One measurement of PM2.5 at one site at one instant.
 
 Composite key: `(site_id, observed_at)`. `Observation.is_trusted` is `qc_flags == []`.
 
+### IngestSummary
+
+What every ingester returns from a run, so callers and the future orchestrator see one shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `source` | `Source` | |
+| `fetched` | `int` | Rows in the source payload(s). |
+| `rejected` | `dict[str, int]` | Boundary-rejection reason → count. |
+| `written` | `int` | Observations handed to the store. |
+| `flagged` | `dict[QcFlag, int]` | Flag → number of observations carrying it. |
+| `partitions` | `list[str]` | Archive partition URIs touched. |
+| `snapshot_at` | `datetime \| None` | Snapshot sources: the payload's own timestamp. |
+| `window_start`, `window_end` | `datetime \| None` | Windowed sources: the requested window. |
+
+### BoundingBox
+
+The spatial extent every ingester queries, parsed once from `AQDT_BBOX`
+(`nwlng,nwlat,selng,selat`, WGS84). Validation: each coordinate in range, `nwlat > selat`,
+`nwlng < selng`. Lives here because it is part of the canonical geospatial vocabulary rather than
+any one source's contract; each ingester renders it into its own API's parameter names.
+
 Not in the schema, by design: any ingestion timestamp, run identifier, or host detail. Their
 absence is what makes archive writes deterministic.
 
@@ -270,7 +292,7 @@ The schema lives as ordered SQL files under `src/aqdt/observation_store/sql/` an
 ```
 src/aqdt/
   observation_store/
-    schemas.py     # Source, SiteType, QcFlag, Site, Observation (Pydantic)
+    schemas.py     # Source, SiteType, QcFlag, Site, Observation, BoundingBox, IngestSummary (Pydantic)
     frames.py      # SitesFrame, ObservationsFrame (Pandera)
     archive.py     # write_/read_ observations and sites
     postgis.py     # apply_schema, load_archive, rebuild
