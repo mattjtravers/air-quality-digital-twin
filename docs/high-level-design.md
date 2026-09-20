@@ -151,7 +151,8 @@ flowchart LR
     PA --> PAI --> ARC
     AN --> ANI --> ARC
     ARC -->|load| PG
-    PG --> CAL --> FUS --> EVL
+    ARC --> CAL --> ARC
+    CAL --> FUS --> EVL
     HR --> ZR --> TRN
     FUS --> ZR
 ```
@@ -171,7 +172,9 @@ system of record; PostGIS, running inside the Codespace, is a rebuildable servin
 spatial query and GIS tooling.
 
 **Calibration, fusion, transport, evaluation** — later increments, each a separate component
-reading from the store. Named here so the store's schema is designed for them.
+reading from the archive and writing its products back through the store's primitives, so that
+PostGIS serves every layer's output and stays rebuildable from the archive alone. Named here so
+the store's schema is designed for them.
 
 ### Data flow per run
 
@@ -260,7 +263,9 @@ O'Regan et al. calibrated every sensor against a single reference monitor regard
 (up to ~12 km). The D.C. metro is larger and has several monitors, so each PurpleAir sensor is
 matched to reference monitors by distance (nearest, or distance-weighted within a radius). The
 calibration layer is a later increment; the decision is recorded now because it constrains the
-observation schema (full-precision coordinates, stable site identity, spatial index in PostGIS).
+observation schema (full-precision coordinates, stable site identity). Distances are computed
+from the archive in GeoPandas rather than in PostGIS so that calibration stays a pure function of
+the archive; PostGIS serves the results.
 
 ### Schemas: Pydantic for records, Pandera for frames
 

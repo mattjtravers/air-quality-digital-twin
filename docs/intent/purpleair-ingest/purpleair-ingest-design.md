@@ -78,7 +78,7 @@ Checks run in the order listed; every applicable flag is raised (they are not mu
 |---|---|
 | `missing_value` | `pm2.5_cf_1` is null. |
 | `channel_missing` | Exactly one of `pm2.5_cf_1_a`, `pm2.5_cf_1_b` is null. |
-| `out_of_range` | Any present PM value is `< 0` or `> 1000` µg/m³ (the Plantower PMS5003 reporting ceiling), humidity is outside [0, 100], or `last_seen` is more than 5 minutes after the response's `data_time_stamp` (sensor clock skew). |
+| `out_of_range` | Any present PM value is `< 0` or `> 1000` µg/m³ (the Plantower PMS5003 reporting ceiling), or humidity is outside [0, 100]. |
 | `channel_disagreement` | Both channels present and both `\|A − B\| > 5` µg/m³ and `\|A − B\| / mean(A, B) > 0.61`, per the EPA channel-agreement criteria (Barkjohn et al. 2021). |
 
 The agreement criteria were published for 24-hour averages; applied here to each snapshot reading
@@ -118,7 +118,6 @@ distance-aware calibration against AirNow monitors, which is a later component c
 | `site_type` | `low_cost_sensor` |
 | `name` | `name` |
 | `latitude`, `longitude` | as reported, unrounded |
-| `last_observed_at` | `last_seen` |
 
 `Observation`:
 
@@ -135,13 +134,14 @@ distance-aware calibration against AirNow monitors, which is a later component c
 
 ## Run
 
-`ingest_purpleair(settings, archive_uri) -> IngestSummary`:
+`ingest_purpleair(settings, archive_uri, conn=None) -> IngestSummary`:
 
 1. Fetch one snapshot for the bounding box.
 2. Zip rows; validate each into `PurpleAirSensorRecord`; collect boundary rejections.
 3. Apply QC and correction; build `Site` and `Observation` records.
 4. Write sites then observations to the store.
-5. Return the summary.
+5. If a PostGIS connection was given, load the partitions just written (`load_partitions`).
+6. Return the summary.
 
 `IngestSummary` is the observation store's summary model, with `snapshot_at` set to the
 response's `data_time_stamp` and the window fields unset.
@@ -181,6 +181,7 @@ tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B 
 | Correction equation | Barkjohn 2021 linear form | EPA's 2022 extended (piecewise, for high smoke concentrations); no correction | The linear form is the published, widely-cited baseline and is exact for the concentration range D.C. sees on ordinary days. The extended form matters during wildfire-smoke episodes and is a deferred upgrade. Storing no corrected value would push a fixed, well-known step onto every downstream consumer. |
 | Correction input | Mean of channels A and B | PurpleAir's sensor-level `pm2.5_cf_1`; channel A only | Matches the published fit, whose input was the A/B mean; the sensor-level field's fallback behaviour when one channel is degraded is PurpleAir's, not EPA's. |
 | `pm25_raw` | PurpleAir's sensor-level `pm2.5_cf_1`, as reported | A/B mean computed here; channel A | Raw means what the source said; the channels are stored beside it, so any recomputation is possible downstream. |
+| Correction when `pm2.5_cf_1` is null but both channels and humidity are present | Computed | Withhold (treat `missing_value` like the other flags) | The correction's inputs are the channels and humidity, not the sensor-level field, so its preconditions are met; the row is untrusted regardless because it carries `missing_value`. |
 | Corrected value when flagged | Null | Compute regardless; compute from the surviving channel | A corrected number implies the input met the correction's preconditions; publishing one for a faulty reading invites misuse. The raw channels remain for anyone who wants to do otherwise. |
 | Indoor sensors | Excluded at the query (`location_type=0`) | Ingest and flag | Indoor air is a different measurand, not a low-quality reading of ambient air; flag-never-drop governs readings of the thing being measured. |
 | Snapshot vs. history endpoint | `/sensors` snapshot per run | `/sensors/:id/history` per sensor | One request per run versus one per sensor per run; snapshot polling matches the batch execution model and history depth is not a runtime prerequisite. |
@@ -194,10 +195,7 @@ tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B 
 1. ✅ `max_age=86400`: a sensor silent for over a day is omitted by the API rather than fetched
    and re-written unchanged; staleness within a day is a query-time question for consumers.
 2. ✅ Humidity from the sensor's onboard sensor is used as-is, as in the published fit.
-3. ✅ A future `last_seen` (beyond a 5-minute skew tolerance) is flagged `out_of_range`, not
-   rejected: it is still a reading of ambient air, and the flag keeps it out of trusted data
-   without discarding it.
-4. ✅ An empty payload is a successful, visible no-op; a duplicated sensor within one payload fails
+3. ✅ An empty payload is a successful, visible no-op; a duplicated sensor within one payload fails
    the run at the store's duplicate check.
 
 ### Deferred
@@ -210,6 +208,12 @@ tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B 
 3. Persisting boundary rejections (shared with the observation store's open question).
 4. Verify the relative-difference threshold (0.61, "2 SD" in the source) against Barkjohn et al.
    2021 §2 before the constant is committed to code.
+5. Sensor clock-skew detection (a `last_seen` ahead of the response's `data_time_stamp`). A flag
+   computed against the response timestamp changes from poll to poll for the same
+   `(site_id, last_seen)` and is removed by the store's incoming-wins merge, and storing the
+   response timestamp on the row would make identical sensor rows non-identical across polls.
+   No deterministic formulation has been found; a clock-ahead sensor lands in the partition its
+   own `last_seen` names and is otherwise unaffected.
 
 ## References
 

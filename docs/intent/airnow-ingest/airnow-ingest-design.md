@@ -28,7 +28,7 @@ correction; their value is the reference. Like every ingester, it flags rather t
 | Endpoint | `GET https://www.airnowapi.org/aq/data/` |
 | Auth | `API_KEY` query parameter from `AIRNOW_API_KEY` |
 | Spatial filter | `BBOX=minLon,minLat,maxLon,maxLat` from the project bounding box (`selng,selat,nwlng,nwlat`) |
-| Time window | `startDate`, `endDate` as `YYYY-MM-DDTHH`, UTC, inclusive |
+| Time window | `startDate = start`, `endDate = end − 1 h`, as `YYYY-MM-DDTHH` UTC; the API's hours are inclusive, the project's windows are half-open `[start, end)` |
 | Parameter | `parameters=PM25` |
 | Data type | `dataType=B` (concentration and AQI) |
 | Monitor type | `monitorType=0` (permanent monitors only) |
@@ -36,7 +36,7 @@ correction; their value is the reference. Like every ingester, it flags rather t
 | Format | `format=application/json` |
 | Timeout | 30 s |
 | Retry | Up to 3 attempts with exponential backoff on 429, 5xx, and connection/timeout errors; any other 4xx fails the run immediately. When retries are exhausted the run fails with an error carrying the last status or exception |
-| Chunking | Windows longer than 24 hours are fetched in consecutive 24-hour requests |
+| Chunking | Windows longer than 24 hours are fetched as consecutive half-open 24-hour requests `[t, t + 24 h)` |
 
 The response is a JSON array of row objects, one per site per hour per parameter. Field
 semantics:
@@ -117,10 +117,15 @@ code with any country prefix is accepted unchanged.
 | `site_id_unresolved` | As above. |
 
 Flatline detection needs the hours before the requested window. The run therefore fetches
-`[start − (flatline_hours − 1) h, end]` and evaluates flatlines over the whole fetched series per
+`[start − (flatline_hours − 1) h, end)` and evaluates flatlines over the whole fetched series per
 site. Every fetched hour is written — the earlier hours re-emitted with whatever flags the longer
 series now justifies, and with any upstream revisions AirNow has published since — and the
 store's incoming-wins merge applies them.
+
+The trailing edge is the mirror case: a flatline that begins in the last `flatline_hours − 1`
+hours of a window cannot be recognised until a later run re-fetches those hours. Routine runs
+overlap their predecessor by far more than that, so the flags arrive one run late rather than
+never; this is expected, not a defect.
 
 No corrected value is produced: `pm25_corrected` is null for reference monitors, and `pm25_raw`
 is the value calibration treats as truth.
@@ -137,7 +142,6 @@ is the value calibration treats as truth.
 | `site_type` | `reference_monitor` |
 | `name` | `SiteName` |
 | `latitude`, `longitude` | as reported, unrounded |
-| `last_observed_at` | latest `UTC` for the site in the run |
 
 `Observation`:
 
@@ -152,21 +156,26 @@ is the value calibration treats as truth.
 
 ## Run
 
-`ingest_airnow(settings, archive_uri, start, end) -> IngestSummary`:
+`ingest_airnow(settings, archive_uri, start, end, conn=None) -> IngestSummary`:
 
-1. Extend the window backwards by `flatline_hours − 1` hours; fetch in 24-hour chunks.
+1. Extend the window backwards by `flatline_hours − 1` hours to `[start − (flatline_hours − 1) h, end)`;
+   fetch in 24-hour chunks.
 2. Validate each row into `AirNowRow`; collect boundary rejections.
 3. Normalize site identifiers; reject site-hour duplicates; group rows by site and sort by hour.
 4. Apply QC per site; build `Site` and `Observation` records.
 5. Write sites then observations to the store.
-6. Return the summary.
+6. If a PostGIS connection was given, load the partitions just written (`load_partitions`).
+7. Return the summary.
 
-`start` and `end` are explicit, tz-aware UTC, truncated to the hour; a naive datetime fails
-validation. The caller chooses the window — a routine run covers the last 24 hours, a backfill
-passes a larger one. A response with zero rows is a successful run reporting `fetched=0`.
+`start` and `end` are explicit, tz-aware UTC, truncated to the hour, and bound the half-open
+window `[start, end)`; a naive datetime fails validation. The caller chooses the window — a
+routine run covers the last 48 hours, matching the period AirNow re-issues on every hourly
+update, so each run also collects the revisions to preliminary data; a backfill passes a larger
+window. A response with zero rows is a successful run reporting `fetched=0`.
 
 `IngestSummary` is the observation store's summary model, with `window_start`/`window_end` set
-to the requested (unextended) window and `snapshot_at` unset.
+to the requested (unextended) half-open window and `snapshot_at` unset. `written` counts every
+fetched hour handed to the store, lookback hours included, so `fetched == written + Σ rejected`.
 
 Settings (`AirNowSettings`, Pydantic settings from the environment): `AIRNOW_API_KEY`,
 `AQDT_BBOX` (parsed into the store's `BoundingBox`), `flatline_hours`, and the constants in the
@@ -199,6 +208,8 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 | Duplicate site-hour in one run | Keep first, count the rest as boundary rejections | Fail the run; keep last | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows; failing the run for a plausible upstream shape is too brittle, and dropping silently hides it. The count makes it visible. |
 | Mobile monitors | Excluded at the query (`monitorType=0`) | Ingest and flag | A mobile monitor has no fixed site identity; nothing downstream could join it. |
 | Corrected value | Null | Copy `pm25_raw` | Reference monitors are the reference; a corrected column equal to the raw one implies a correction happened. |
+| Routine window | 48 hours | 24 hours; since the last run | AirNow re-issues the preceding 48 hours on every hourly update; a 48-hour window collects every revision at the cost of one extra request per run. |
+| Unresolved-site key | `IntlAQSCode`, else `FullAQSCode`, else `SiteName` as received | Coordinates; a hash of the row | Two distinct unresolvable sites sharing a `SiteName` — reachable only when both codes are absent — would merge into one flagged site and count as duplicates. Accepted: the metro's monitors always carry both codes, and an unresolved site is already excluded from trusted data. |
 | Request chunking | 24-hour requests | One request per window; per-hour requests | Keeps each request well inside AirNow's response and rate limits while making a week-long backfill seven calls, not 168. |
 | HTTP client | `httpx` (sync) | `requests` | Same reasoning as the PurpleAir ingester; one client library across ingesters. |
 
