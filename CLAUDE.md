@@ -8,13 +8,14 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-**Design is ahead of code.** The HLD (`docs/high-level-design.md`) and three leaf LLDs under
-`docs/intent/` — `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`) —
-are drafted. EARS specs, tests, and application code for those segments do not exist yet; the
-only test is a placeholder. Check the file tree before claiming any module exists. Read the HLD
-first, then the LLD for the segment being touched; the LLDs are the source of truth for schemas,
-API contracts, QC rules, and package layout (planned: `src/aqdt/` with `observation_store/`,
-`purpleair/`, `airnow/`; tests mirror it under `tests/`).
+**Design is ahead of code.** The HLD (`docs/high-level-design.md`) and four leaf LLDs under
+`docs/intent/` — `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`),
+and `calibration` (`CAL`, a later increment) — are drafted. EARS specs, tests, and application
+code for those segments do not exist yet; the only test is a placeholder. Check the file tree
+before claiming any module exists. Read the HLD first, then the LLD for the segment being touched;
+the LLDs are the source of truth for schemas, API contracts, QC rules, and package layout
+(planned: `src/aqdt/` with `observation_store/`, `purpleair/`, `airnow/`, `calibration/`; tests
+mirror it under `tests/`).
 
 Key architectural facts to keep in mind (rationale in the HLD):
 

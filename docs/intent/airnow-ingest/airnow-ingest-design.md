@@ -35,14 +35,16 @@ correction; their value is the reference. Like every ingester, it flags rather t
 | Detail | `verbose=1` (site name, agency, AQS codes), `includerawconcentrations=1` |
 | Format | `format=application/json` |
 | Timeout | 30 s |
-| Retry | Up to 3 attempts with exponential backoff on 429, 5xx, and connection/timeout errors; any other 4xx fails the run immediately |
+| Retry | Up to 3 attempts with exponential backoff on 429, 5xx, and connection/timeout errors; any other 4xx fails the run immediately. When retries are exhausted the run fails with an error carrying the last status or exception |
 | Chunking | Windows longer than 24 hours are fetched in consecutive 24-hour requests |
 
 The response is a JSON array of row objects, one per site per hour per parameter. Field
 semantics:
 
-- `UTC` — the hour the value is for, `YYYY-MM-DDTHH:MM`, UTC. Downstream alignment with
-  PurpleAir snapshots assumes this labels the *start* of the averaging hour; see Deferred #4.
+- `UTC` — the hour the value is for, `YYYY-MM-DDTHH:MM`, UTC. It labels the *start* of the
+  averaging hour: a value stamped `17:00` was measured from 17:00 to 17:59 UTC (AirNow Hourly
+  Data fact sheet). AirNow revises the preceding 48 hours on every hourly update, so any window
+  fetched within two days of the present may return values that differ from an earlier fetch.
 - `Parameter` — `PM2.5` for the rows requested.
 - `Value` — the hourly concentration in `Unit` (`UG/M3`). `-999` is AirNow's missing-value
   sentinel.
@@ -78,8 +80,9 @@ identity to join on.
 
 Boundary rejections (counted with a reason, not turned into observations): missing or unparseable
 `UTC`, missing coordinates, a `Parameter` other than `PM2.5`, a `Unit` other than `UG/M3`, and a
-second row for the same site and hour within one response (the first is kept; the rest are counted
-under `duplicate_site_hour`). A null `Value` is valid at the boundary and becomes a flag.
+second row for the same site and hour within one run (the first is kept; the rest are counted
+under `duplicate_site_hour`). "Same site" is judged on the normalized identifier, so the duplicate
+check runs after normalization. A null `Value` is valid at the boundary and becomes a flag.
 
 ## Site Identifier Normalization
 
@@ -152,23 +155,23 @@ is the value calibration treats as truth.
 `ingest_airnow(settings, archive_uri, start, end) -> IngestSummary`:
 
 1. Extend the window backwards by `flatline_hours − 1` hours; fetch in 24-hour chunks.
-2. Validate each row into `AirNowRow`; collect boundary rejections, including within-response
-   site-hour duplicates.
-3. Normalize site identifiers; group rows by site and sort by hour.
+2. Validate each row into `AirNowRow`; collect boundary rejections.
+3. Normalize site identifiers; reject site-hour duplicates; group rows by site and sort by hour.
 4. Apply QC per site; build `Site` and `Observation` records.
 5. Write sites then observations to the store.
 6. Return the summary.
 
-`start` and `end` are explicit, tz-aware UTC, truncated to the hour. The command-line default is
-`end` = the current hour, `start` = `end − 24 h`; backfills pass a larger window. A response with
-zero rows is a successful run reporting `fetched=0`.
+`start` and `end` are explicit, tz-aware UTC, truncated to the hour; a naive datetime fails
+validation. The caller chooses the window — a routine run covers the last 24 hours, a backfill
+passes a larger one. A response with zero rows is a successful run reporting `fetched=0`.
 
 `IngestSummary` is the observation store's summary model, with `window_start`/`window_end` set
 to the requested (unextended) window and `snapshot_at` unset.
 
 Settings (`AirNowSettings`, Pydantic settings from the environment): `AIRNOW_API_KEY`,
 `AQDT_BBOX` (parsed into the store's `BoundingBox`), `flatline_hours`, and the constants in the
-API contract table as overridable defaults.
+API contract table as overridable defaults. Constructing the settings with either required
+variable unset fails immediately with an error naming the variable.
 
 ## Package Layout
 
@@ -193,7 +196,7 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 | Conflicting codes | Unresolved, flagged | Prefer `IntlAQSCode`; prefer `FullAQSCode` | Two identifiers that disagree after normalization mean the row's identity is genuinely uncertain; guessing would silently join observations to the wrong site. |
 | Flatline lookback | Over-fetch `flatline_hours − 1` hours before the window | Read prior hours from the archive | Over-fetching removes a read dependency on the archive, and re-fetching recent hours also picks up AirNow's revisions to preliminary data, which the archive wants anyway. |
 | Flatline threshold | 3 consecutive identical hours, configurable | 6; 12; zero-only rule | Matches the observed fault; hourly urban PM2.5 at 0.1 µg/m³ resolution rarely repeats three times by chance, and a false positive only moves a reading out of the trusted set, it does not remove it. |
-| Duplicate site-hour in one response | Keep first, count the rest as boundary rejections | Fail the run; keep last | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows; failing the run for a plausible upstream shape is too brittle, and dropping silently hides it. The count makes it visible. |
+| Duplicate site-hour in one run | Keep first, count the rest as boundary rejections | Fail the run; keep last | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows; failing the run for a plausible upstream shape is too brittle, and dropping silently hides it. The count makes it visible. |
 | Mobile monitors | Excluded at the query (`monitorType=0`) | Ingest and flag | A mobile monitor has no fixed site identity; nothing downstream could join it. |
 | Corrected value | Null | Copy `pm25_raw` | Reference monitors are the reference; a corrected column equal to the raw one implies a correction happened. |
 | Request chunking | 24-hour requests | One request per window; per-hour requests | Keeps each request well inside AirNow's response and rate limits while making a week-long backfill seven calls, not 168. |
@@ -208,6 +211,8 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 2. ✅ A hour missing from a site's series breaks a flatline run rather than bridging it.
 3. ✅ No future-timestamp check: the query's `endDate` bounds what AirNow returns, and there is
    no response-level timestamp to compare against without depending on run time.
+4. ✅ `UTC` labels the start of the averaging hour (AirNow Hourly Data fact sheet), so
+   `observed_at = UTC` with no shift, and the canonical timestamp is always the hour start.
 
 ### Deferred
 
@@ -215,16 +220,14 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 2. Whether `RawConcentration` (AirNow's pre-processing value) should be promoted to a schema
    column if calibration prefers it to `Value`. It is in `raw` meanwhile.
 3. Persisting boundary rejections (shared with the observation store's open question).
-4. Confirm against the AirNow API documentation whether `UTC` labels the start or the end of the
-   hour the value averages. Calibration aligns PurpleAir snapshots to `[UTC, UTC + 1 h)` on the
-   start-of-hour assumption; if it is end-of-hour, `observed_at` should be set to `UTC − 1 h` at
-   the boundary so the canonical timestamp is always the hour start. Must be settled before
-   `observed_at` mapping is coded.
 
 ## References
 
 - EPA AirNow API, Data Query (`/aq/data/`) — parameters, `dataType`, `monitorType`,
   `verbose`, `-999` sentinel.
+- AirNow Hourly Data File fact sheet (`docs.airnowapi.org/docs/HourlyDataFactSheet.pdf`) —
+  timestamps are GMT and mark the beginning of the measurement period; the preceding 48 hours
+  are re-issued every hour.
 - EPA AQS site identifier structure (state–county–site; international prefix `840`).
 - `docs/intent/observation-store/observation-store-design.md` — canonical records, flag
   vocabulary, `BoundingBox`, write semantics.

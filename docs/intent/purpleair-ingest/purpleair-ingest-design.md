@@ -32,7 +32,7 @@ with its flags and its raw channel values intact.
 | Freshness filter | `max_age=86400` (sensors not seen in 24 h are omitted by the API) |
 | Fields requested | `sensor_index, name, latitude, longitude, last_seen, humidity, pm2.5_cf_1, pm2.5_cf_1_a, pm2.5_cf_1_b` |
 | Timeout | 30 s |
-| Retry | Up to 3 attempts with exponential backoff on 429, 5xx, and connection/timeout errors; any other 4xx fails the run immediately |
+| Retry | Up to 3 attempts with exponential backoff on 429, 5xx, and connection/timeout errors; any other 4xx fails the run immediately. When retries are exhausted the run fails with an error carrying the last status or exception |
 
 The response is `{"fields": [...], "data": [[...], ...], "data_time_stamp": <epoch>, ...}` —
 column names once, then one positional row per sensor. The client zips each row with `fields`
@@ -85,7 +85,9 @@ The agreement criteria were published for 24-hour averages; applied here to each
 they are stricter, which is the conservative direction for a flag that is never used to drop data.
 Both the absolute and relative conditions must hold, so two channels reading 1 and 3 µg/m³
 (relative difference 100%, absolute 2) are not flagged, and 500 vs 506 (absolute 6, relative 1%)
-are not flagged either.
+are not flagged either. When `mean(A, B)` is 0 the relative condition is treated as not met rather
+than evaluated, so two channels reading zero — a common clean-air reading — never raise the flag
+or a division error.
 
 ### Corrected value
 
@@ -156,7 +158,8 @@ accumulates by running repeatedly; the per-sensor `/sensors/:id/history` endpoin
 
 Settings (`PurpleAirSettings`, Pydantic settings from the environment): `PURPLEAIR_API_KEY`,
 `AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`), and the constants
-in the API contract table as overridable defaults.
+in the API contract table as overridable defaults. Constructing the settings with either required
+variable unset fails immediately with an error naming the variable.
 
 ## Package Layout
 

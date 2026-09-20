@@ -90,7 +90,7 @@ One measurement of PM2.5 at one site at one instant.
 | `pm25_channel_b` | `float \| None` | PurpleAir only. |
 | `humidity` | `float \| None` | Percent relative humidity, where the source reports it. |
 | `pm25_corrected` | `float \| None` | Source-standard corrected value where one exists (PurpleAir: EPA/Barkjohn). Null where no correction applies or the ingester withheld it. |
-| `qc_flags` | `list[QcFlag]` | Empty list means every check passed. Order-independent; stored sorted. |
+| `qc_flags` | `list[QcFlag]` | Empty list means every check passed. Order-independent; stored sorted and de-duplicated. |
 | `raw` | `dict[str, Any]` | The source record this observation was parsed from, unmodified. |
 
 Composite key: `(site_id, observed_at)`. `Observation.is_trusted` is `qc_flags == []`.
@@ -131,7 +131,7 @@ source; the vocabulary is the registry of what a flag means.
 | `out_of_range` | A value lies outside physically plausible bounds for its field. |
 | `channel_missing` | A dual-channel sensor reported only one channel. |
 | `channel_disagreement` | Dual-channel readings differ beyond the source's published agreement criteria. |
-| `flatline` | The value is identical across a run of consecutive observations longer than the source's threshold. |
+| `flatline` | The value is identical across a run of consecutive observations at least as long as the source's threshold. |
 | `site_id_unresolved` | The source's site identifier could not be normalized to a canonical `site_id`. |
 
 Every flag is a function of the observation and its neighbours in the archive, never of when the
@@ -185,7 +185,7 @@ the error names the failing check and rows.
 
 ### Write semantics
 
-`write_observations(records, archive_dir)`:
+`write_observations(records, archive_uri)`:
 
 1. Build a frame from the incoming records and validate it against `ObservationsFrame` (minus the
    sortedness check). Duplicate `(site_id, observed_at)` keys within one call fail validation —
@@ -205,7 +205,7 @@ something about an earlier hour, as flatline detection does — but the raw fiel
 the stored ones when upstream is unchanged. `raw` is serialized with sorted keys and default float
 formatting so identical upstream records produce identical bytes.
 
-`write_sites(records, archive_dir)`: same merge-and-replace on `site_id`, one file per source.
+`write_sites(records, archive_uri)`: same merge-and-replace on `site_id`, one file per source.
 
 Incoming-wins merging is what makes the archive follow upstream revisions: AirNow marks its data
 preliminary and may revise an hour on a later query, and the archive should carry the revised
@@ -238,8 +238,10 @@ and out.
 `read_observations(archive_uri, source=None, start=None, end=None)` returns a validated
 `ObservationsFrame` GeoDataFrame from every partition whose date intersects `[start, end]`,
 filtered to the exact `observed_at` range. `read_sites(archive_uri, source=None)` likewise returns
-a `SitesFrame`. Frames are the read type; callers needing record models (rare — re-emitting rows
-with updated flags) convert with `Observation.from_frame(frame)`.
+a `SitesFrame`. A read that matches no partition is not an error — a fresh archive or an
+unpopulated window is a normal state — so it logs the request at INFO and returns an empty frame
+with the model's columns and dtypes. Frames are the read type; callers needing record models
+(rare — re-emitting rows with updated flags) convert with `Observation.from_frame(frame)`.
 
 ## PostGIS Serving Layer
 
@@ -307,6 +309,10 @@ The schema lives as ordered SQL files under `src/aqdt/observation_store/sql/` an
   | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` | S3 credentials | Codespaces secrets |
   | `DATABASE_URL` | PostGIS connection | docker-compose default |
 
+  An archive operation invoked without an explicit `archive_uri` reads `AQDT_ARCHIVE_URI`; if it
+  is unset the operation fails immediately with an error naming the variable, rather than falling
+  back to a local path that would silently split the archive.
+
 - Devcontainer: `docker-compose.yml` with the app container and a `postgis/postgis` service;
   `devcontainer.json` references it via `dockerComposeFile`. `postCreateCommand` runs
   `uv sync --all-groups`, `apply_schema`, and `rebuild`.
@@ -327,10 +333,12 @@ src/aqdt/
     sql/           # ordered schema files
   purpleair/       # purpleair-ingest segment
   airnow/          # airnow-ingest segment
+  calibration/     # calibration segment (a later increment)
 tests/
   observation_store/
   purpleair/
   airnow/
+  calibration/
 ```
 
 `aqdt` is the import package for the whole project (`src/` layout, declared in `pyproject.toml`).
@@ -363,7 +371,8 @@ tests/
 
 ### Resolved
 
-1. ✅ Datetimes are tz-aware UTC everywhere; naive datetimes fail validation at construction.
+1. ✅ Datetimes are tz-aware UTC everywhere; naive datetimes fail validation at construction, and
+   tz-aware non-UTC datetimes are converted to UTC on construction.
 2. ✅ Concurrent writers to one partition are unsupported; serialization is the caller's job.
 3. ✅ An observation without coordinates cannot exist (schema requires them); such source records
    are boundary validation failures.
