@@ -4,10 +4,25 @@ version = "0.1.0"
 description = "Air quality digital twin"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fsspec>=2026.9.0",
+    "geopandas>=1.1.4",
+    "httpx>=0.28.1",
+    "numpy>=2.4.6",
+    "pandera>=0.33.1",
+    "psycopg[binary]>=3.3.6",
+    "pyarrow>=25.0.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pyproj>=3.7.2",
+    "s3fs>=2026.9.0",
+    "shapely>=2.1.2",
+]
 
 [dependency-groups]
 dev = [
+    "boto3>=1.43.75",
+    "moto[s3,server]>=5.2.3",
     "pytest==9.1.1",
     "ruff==0.16.8",
 ]
@@ -21,3 +36,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aqdt"]

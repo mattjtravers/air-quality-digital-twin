@@ -138,7 +138,7 @@ is the value calibration treats as truth.
 |---|---|
 | `site_id` | normalized, as above |
 | `source` | `airnow` |
-| `source_native_id` | `FullAQSCode` as received (falling back to `IntlAQSCode`) |
+| `source_native_id` | `FullAQSCode` as received, else `IntlAQSCode`, else `SiteName` |
 | `site_type` | `reference_monitor` |
 | `name` | `SiteName` |
 | `latitude`, `longitude` | as reported, unrounded |

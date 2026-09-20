@@ -55,7 +55,7 @@ canonical records), `RUN` (the `ingest_airnow` entry point and summary), `CFG` (
 
 ## Mapping to Canonical Records
 
-- [ ] **AN-MAP-001**: When building a `Site` from a site's validated rows, the AirNow ingester shall set `site_id` per AN-SITE, `source = airnow`, `source_native_id` = `FullAQSCode` as received (falling back to `IntlAQSCode` as received), `site_type = reference_monitor`, `name` from `SiteName`, and `latitude`/`longitude` as reported without rounding.
+- [ ] **AN-MAP-001**: When building a `Site` from a site's validated rows, the AirNow ingester shall set `site_id` per AN-SITE, `source = airnow`, `source_native_id` = `FullAQSCode` as received (falling back to `IntlAQSCode` as received, then to `SiteName`, the same chain as the unresolved-site key), `site_type = reference_monitor`, `name` from `SiteName`, and `latitude`/`longitude` as reported without rounding.
 - [ ] **AN-MAP-002**: When building an `Observation` from a validated AirNow row, the AirNow ingester shall set `site_id`, `source`, `latitude`, `longitude` as for the `Site`, `observed_at = UTC` (which labels the start of the averaging hour; no shift is applied), `pm25_raw` from `Value` (null when AirNow sent `-999`), `pm25_channel_a`, `pm25_channel_b`, `humidity`, and `pm25_corrected` all null, and `qc_flags` per AN-QC.
 - [ ] **AN-MAP-003**: When building an `Observation`, the AirNow ingester shall set `raw` to the response row object exactly as received, with no keys added, removed, renamed, or values altered (so `AQI`, `Category`, `RawConcentration`, `AgencyName`, and both AQS codes remain available, and `-999` sentinels remain `-999` in `raw`).
 

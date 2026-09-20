@@ -112,12 +112,13 @@ What every ingester returns from a run, so callers and the future orchestrator s
 | `window_start`, `window_end` | `datetime \| None` | Windowed sources: the requested window, half-open. |
 
 Invariant: `fetched == written + sum(rejected.values())` — every source row is either an
-observation handed to the store or a counted rejection.
+observation handed to the store or a counted rejection. The model enforces it, and
+`window_start < window_end`, on construction, so every ingester inherits the check.
 
 ### BoundingBox
 
 The spatial extent every ingester queries, parsed once from `AQDT_BBOX`
-(`nwlng,nwlat,selng,selat`, WGS84). Validation: each coordinate in range, `nwlat > selat`,
+(`nwlng,nwlat,selng,selat`, WGS84) by `BoundingBox.parse`. Validation: each coordinate in range, `nwlat > selat`,
 `nwlng < selng`. Lives here because it is part of the canonical geospatial vocabulary rather than
 any one source's contract; each ingester renders it into its own API's parameter names.
 
@@ -171,6 +172,13 @@ frame must satisfy:
 
 A frame that fails validation is never written to the archive and never returned from a read;
 the error names the failing check and rows.
+
+`frames.py` also holds the record↔frame bridge: `observations_to_frame(records)` and
+`sites_to_frame(records)` build the GeoDataFrame (deriving `geometry`, keeping `raw` as a dict
+column — JSON serialization happens only at the archive boundary), and `Observation.from_frame`
+is the inverse. The frame models never check row order; `validate_partition(frame, model)` runs
+the model and then the sortedness check, and is what the archive calls on the way in and out.
+That split is how "sortedness applies to partitions only" is expressed in code.
 
 ## GeoParquet Archive
 
@@ -241,10 +249,11 @@ described by one `Product` definition and written and read by two primitives.
 
 - `prefix` — path under `archive_uri` (`""` for observations and sites, `calibration/fits` for
   calibration fits).
-- `partition_keys` — an ordered mapping of key name → function of the frame returning the
-  rendered partition value for each row (`{"source": ..., "date": lambda f:
-  f.observed_at.dt.strftime("%Y-%m-%d")}`). Keys are derived, not stored as columns, so a frame
-  model never has to carry them.
+- `partition_keys` — an ordered mapping of key name → function of the frame returning each
+  row's partition value (`{"source": lambda f: f.source, "date": lambda f:
+  f.observed_at.dt.date}`); the store renders values to path segments (dates as `YYYY-MM-DD`,
+  datetimes as `YYYY-MM-DDTHH`, strings and enumerations as their value). Keys are derived, not
+  stored as columns, so a frame model never has to carry them.
 - `key_cols` — the merge key within a partition.
 - `frame_model` — the Pandera model every partition is validated against.
 - `filename` — the object name inside a partition directory.
@@ -368,7 +377,7 @@ is `DATABASE_URL` from the environment (docker-compose default in the Codespace)
 src/aqdt/
   observation_store/
     schemas.py     # Source, SiteType, QcFlag, Site, Observation, BoundingBox, IngestSummary (Pydantic)
-    frames.py      # SitesFrame, ObservationsFrame (Pandera)
+    frames.py      # SitesFrame, ObservationsFrame (Pandera); *_to_frame builders; validate_partition
     products.py    # Product definition; the observation and site products
     archive.py     # write_partitioned / read_partitioned and the observation/site wrappers
     postgis.py     # apply_schema, load_partitions, rebuild
