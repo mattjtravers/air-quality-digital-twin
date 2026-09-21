@@ -221,9 +221,8 @@ That split is how "sortedness applies to partitions only" is expressed in code.
 2. Group by `(source, date)`.
 3. For each partition: read the existing object if present, merge on `(site_id, observed_at)` with
    the incoming row winning, sort, validate the merged frame, and write the whole partition as one
-   object. On a local filesystem this is a temporary file renamed over the target; on S3 a single
-   PUT is atomic (a partial object is never visible). Either way a crash mid-write leaves the
-   previous partition intact.
+   object. The write is atomic (a partial object is never visible) and conditional on the
+   partition being unchanged since it was read — see "One writer per partition" below.
 4. Return the list of partition URIs touched.
 
 A re-emitted row may change derived fields (`qc_flags`, `pm25_corrected`) — a later run can learn
@@ -238,11 +237,39 @@ Incoming-wins merging is what makes the archive follow upstream revisions: AirNo
 preliminary and may revise an hour on a later query, and the archive should carry the revised
 value. Two runs that receive identical upstream data write identical bytes.
 
-The archive assumes a single writer per partition at a time; object storage offers no lock
-around read-merge-write, so two concurrent runs on the same partition would lose one run's rows.
-Serializing runs is the caller's responsibility (today: one process; later: the orchestrator).
-
 An empty record set writes nothing and touches no files.
+
+### One writer per partition
+
+Read-merge-write is only correct if nothing replaces the partition between the read and the
+write; otherwise the writer that lands second silently discards the first writer's rows. Runs
+are triggered by schedules, by hand, and eventually by an orchestrator, so the store guarantees
+this itself rather than asking every caller to serialize:
+
+- **S3: compare-and-swap.** The read of an existing partition captures the object's ETag. The
+  write is a single `PUT` with `If-Match: <that ETag>` — or `If-None-Match: *` when the
+  partition did not exist — so S3 refuses it (412) if the object changed underneath. On refusal
+  the store re-reads, re-merges its rows into what is now stored, and writes again, up to a
+  bounded number of attempts (5) before failing the run. Nothing is locked, so a crashed writer
+  leaves nothing to clean up, and a losing writer loses only the cost of one merge.
+- **Local filesystem: an advisory lock.** A `flock` on `{filename}.lock` beside the partition is
+  held across read-merge-write; the atomic rename happens inside it. Local archives are for
+  tests and offline development, where a lock file costs nothing.
+
+Either way the write stays atomic: a temporary file renamed over the target locally; one PUT on
+S3. Retries are only ever caused by another writer, so a partition is never written twice by the
+same run for the same reason, and byte determinism (identical input → identical bytes) is
+unaffected. Concurrent writers to *different* partitions never interact. Two writers creating
+the same new partition both attempt `If-None-Match: *`; the second is refused, re-reads the now
+existing object, and merges into it like any later writer.
+
+Details that make this hold: the S3 read and its ETag come from one request, so the token
+always describes the bytes that were merged; the filesystem's metadata cache is invalidated
+before a re-read so a refused writer sees the object that beat it; the lock file is
+dot-prefixed (`.{filename}.lock`) so pyarrow, DuckDB, and the store's own partition discovery
+ignore it; and a run that exhausts its attempts fails with an error naming the partition. The
+guarantee relies on S3 conditional writes, which AWS S3 provides and the test suite's in-process
+mock honours.
 
 ### Partition primitives for derived products
 
@@ -275,8 +302,8 @@ nothing matches. `write_observations`, `write_sites`, `read_observations`, and `
 thin wrappers over these with the observation and site products.
 
 Both primitives carry the same guarantees as the observation writes: deterministic bytes for
-identical input, one atomic object per partition, single writer per partition, validation on the
-way in and out. A product whose frame has a `geometry` column is written as GeoParquet; one
+identical input, one atomic object per partition, one writer per partition (compare-and-swap),
+validation on the way in and out. A product whose frame has a `geometry` column is written as GeoParquet; one
 without is plain Parquet.
 
 The registry `aqdt.registry.PRODUCTS` lists every product in the project in load order —
@@ -408,6 +435,7 @@ tests/
 | Where site coordinates live | On both `Site` (latest) and every `Observation` (as observed) | Site only; observation only | Sensors get relocated; the observation must record where it was measured, while spatial queries against "the site" want one current point. Denormalization is cheap at this volume. |
 | Provenance of raw payload | Full source record stored as `raw` JSON on every observation | Selected extra fields only; separate raw dump keyed by observation | One column satisfies "traceable to raw payload" with no join and no second store; row volume is small (hundreds of sites, hourly-ish). |
 | Ingestion timestamp / run id | Not stored on rows | `ingested_at` column; `run_id` column | Any per-run value makes re-runs non-identical and breaks the deterministic-write guarantee. Run bookkeeping belongs to the orchestrator when one exists. |
+| Concurrent writers to one partition | The store guarantees one writer per partition: compare-and-swap (`If-Match` on the ETag) on S3, an advisory file lock locally, re-read and re-merge on refusal | Caller serializes runs (a trigger-level concurrency group, an orchestrator); a lock object in S3 with a TTL; a lock service (DynamoDB) | The invariant is the store's, and a guarantee that depends on which trigger started the run cannot cover a hand-run command or a future orchestrator. A lock object needs stale-lock handling for crashed writers; a lock service is a second system. CAS has nothing to leak and costs one extra merge only when two writers actually collide, which at a handful of writes a day per partition is rare. |
 | Merge policy on re-write | Incoming record wins on `(site_id, observed_at)` | First-seen wins; append with version column | Upstream revisions (AirNow preliminary data) should replace earlier values; versioning every row adds a dimension nothing downstream needs yet. |
 | Partition key | `{source}/date={UTC date}` | Hourly partitions; single file per source; partition by site | Daily files stay small enough to rewrite atomically and large enough to avoid file sprawl; source-first lets a run touch only its own tree. |
 | Archive location | S3 bucket, addressed by `fsspec` URI | Workspace directory; git-committed data branch; MinIO sidecar | A Codespace and its volumes are deleted after inactivity, so nothing inside it can be the system of record. S3 is the durable, sector-standard home for cloud-native GeoParquet and is read natively by GeoPandas/pyarrow. Git churns binary Parquet on every run; MinIO lives inside the disposable Codespace and only adds an S3 API to local storage. |
@@ -453,12 +481,6 @@ tests/
 4. A source renumbering an existing site (a new native identifier for the same physical location)
    would leave earlier observations under the old `site_id`. No evidence either source does this;
    revisit if it appears.
-5. Enforce single-writer-per-partition inside `write_partitioned` rather than leaving it to the
-   caller: compare-and-swap on the partition object (`If-Match` on the ETag read during the
-   merge, `If-None-Match: *` on create, re-read and re-merge on `412`) on S3, and an advisory
-   file lock across the read-merge-write locally. Scheduled runs are now the writers, and a
-   trigger-level serialization (Actions concurrency groups) cannot cover a run started by hand or
-   by a future orchestrator. Next slice after the pipeline segment lands.
 
 ## References
 

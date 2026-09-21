@@ -106,17 +106,14 @@ and runs the command. Every job has `timeout-minutes` under its cron interval (P
 AirNow 20, fit 30, apply 20) so a hung run cannot pile up behind itself. GitHub runs `schedule`
 triggers from the default branch only, so a schedule change takes effect when it lands on `main`.
 
-**Concurrency.** The archive's single-writer-per-partition guarantee belongs to the observation
-store (compare-and-swap on partition objects; see its LLD). Until the store enforces it, the
-schedules keep scheduled runs from racing each other: the ingesters write disjoint partitions
-(`source=purpleair/…`, `source=airnow/…`) and each is serialized with itself by its own
-concurrency group; fit and apply *both* write `calibration/sensor_hourly` partitions, so they
-share the `calibrate` group and a pending run waits for the running one. Once the store enforces
-the guarantee the groups remain, as a cap on wasted runner minutes and interleaved logs rather
-than a correctness mechanism. A scheduled run racing a run started by hand is the gap in the
-interim; the loss is bounded to rows the next overlapping run rewrites, never a torn object.
-`cancel-in-progress` is false everywhere — a run in progress is never interrupted mid-write; a
-queued run may be superseded by a newer queued run, which is harmless because windows overlap.
+**Concurrency.** Correctness under concurrent writers is the observation store's: its partition
+writes are compare-and-swap, so a run started by a schedule, by hand, or by anything else can
+never lose another writer's rows (observation-store LLD § One writer per partition). The
+concurrency groups exist to keep two runs of the same workflow from both spending runner minutes
+on overlapping windows and interleaving their logs: each ingester is serialized with itself, and
+fit and apply share the `calibrate` group because both aggregate the same sensor hours.
+`cancel-in-progress` is false everywhere — a run in progress is never interrupted; a queued run
+may be superseded by a newer queued run, which is harmless because windows overlap.
 
 **Configuration on runners.** Credentials are repository secrets: `PURPLEAIR_API_KEY`,
 `AIRNOW_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Non-secret configuration is
@@ -163,8 +160,8 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | Fit `as_of` | Most recent 00:00 UTC | The current hour | Daily refits keyed on midnight are idempotent within the day and produce a readable fit history; calibration accepts any hour for backfill. |
 | PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | Explicit `--postgis` flag; never from the CLI | The environment already says whether a serving layer exists; a developer's Codespace run should refresh it without remembering a flag, and runners cannot load one. |
 | Trigger | GitHub Actions cron, one workflow per run | One workflow with several crons branching on `github.event.schedule`; AWS EventBridge | Per-run workflows keep each schedule, its secrets, and its concurrency group readable in one file. The HLD records why Actions over AWS. |
-| Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are the interim guard and afterwards an efficiency measure | Concurrency groups as the guarantee; a lock service | A property of one trigger cannot protect every caller (a hand-run command, a dispatch backfill, a future orchestrator); the invariant is the store's and is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
-| Serializing fit and apply | Shared concurrency group `calibrate` | Separate groups; fit and apply as one job | Both write `sensor_hourly` partitions; a shared group is the smallest change that keeps scheduled runs from racing while keeping distinct schedules. |
+| Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | Concurrency groups as the guarantee; a lock service | A property of one trigger cannot protect every caller (a hand-run command, a dispatch backfill, a future orchestrator); the invariant is the store's and is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
+| Serializing fit and apply | Shared concurrency group `calibrate` | Separate groups; fit and apply as one job | Both aggregate the same sensor hours; a shared group keeps them from doing that work twice at once while keeping distinct schedules. |
 | Cadence: PurpleAir 15 min | 15 minutes | 5; 30; 60 | Four snapshots an hour comfortably samples each hour; 5 minutes quadruples runner use and API points for no consumer that needs it; hourly risks an hour with a single snapshot when a run is late. |
 | Runner installation | `uv sync --no-dev` | Full sync; a prebuilt container image | Runs need no test tooling; a container image is the AWS alternative's cost, not this one's. |
 | Output | One JSON line per run on stdout | Human-readable summary; nothing | Machine-readable in logs, grep-able across runs, and a future orchestrator can parse it. |
@@ -184,6 +181,8 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
    what was asked and must say so.
 4. ✅ A queued scheduled run superseded by a newer queued run is reported by GitHub as
    cancelled, not failed; the newer run covers its window.
+5. ✅ A scheduled run and a hand-started run may write the same partition at once; the store's
+   compare-and-swap makes that safe, so no trigger-level guard is needed for correctness.
 
 ### Deferred
 

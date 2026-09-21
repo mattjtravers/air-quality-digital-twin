@@ -6,12 +6,14 @@ observation and site functions are thin wrappers over them with their ``Product`
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import io
 import json
 import logging
 import os
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Any
 
@@ -39,6 +41,13 @@ ARCHIVE_URI_VAR = "AQDT_ARCHIVE_URI"
 
 class MissingConfiguration(RuntimeError):
     """A required environment variable is unset."""
+
+
+class ConcurrentWriteError(RuntimeError):
+    """A partition kept changing under this writer for every allowed attempt."""
+
+
+MAX_WRITE_ATTEMPTS = 5
 
 
 # @spec OBS-ENV-001, OBS-ENV-002
@@ -121,11 +130,57 @@ def _read_partition(fs: fsspec.AbstractFileSystem, path: str, product: Product) 
     return _decode(frame, product)
 
 
-# @spec OBS-ARCHIVE-009
-def _write_atomic(fs: fsspec.AbstractFileSystem, path: str, data: bytes) -> None:
-    """One object per partition, never partially visible.
+def _parse_partition(data: bytes, product: Product) -> pd.DataFrame:
+    buffer = io.BytesIO(data)
+    frame = gpd.read_parquet(buffer) if product.has_geometry else pd.read_parquet(buffer)
+    return _decode(frame, product)
 
-    Locally: a temporary file renamed over the target. On object storage: a single PUT.
+
+# @spec OBS-ARCHIVE-023
+def _read_current(
+    fs: fsspec.AbstractFileSystem, path: str, product: Product
+) -> tuple[pd.DataFrame | None, str | None]:
+    """The partition as stored right now, with the token a conditional write must present.
+
+    On S3 the token is the object's ETag, taken from the same request that returned the bytes.
+    Locally there is no token; the advisory lock makes the read-merge-write exclusive instead.
+    Returns ``(None, None)`` when the partition does not exist.
+    """
+    if isinstance(fs, LocalFileSystem):
+        return (_read_partition(fs, path, product) if os.path.exists(path) else None), None
+    fs.invalidate_cache(path)
+    try:
+        with fs.open(path, "rb") as handle:
+            data = handle.read()
+            token = getattr(handle, "details", {}).get("ETag")
+    except FileNotFoundError:
+        return None, None
+    return _parse_partition(data, product), token
+
+
+def _is_precondition_failure(error: BaseException) -> bool:
+    """Whether an exception (possibly wrapped by s3fs) is S3's 412 Precondition Failed."""
+    seen: BaseException | None = error
+    while seen is not None:
+        response = getattr(seen, "response", None)
+        if isinstance(response, dict):
+            code = response.get("Error", {}).get("Code")
+            if code in ("PreconditionFailed", "412"):
+                return True
+        if "pre-condition" in str(seen).lower() or "precondition" in str(seen).lower():
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+# @spec OBS-ARCHIVE-009, OBS-ARCHIVE-023
+def _write_atomic(fs: fsspec.AbstractFileSystem, path: str, data: bytes, token: str | None) -> bool:
+    """One object per partition, never partially visible; on S3, only if unchanged since read.
+
+    Locally: a temporary file renamed over the target (the caller holds the partition lock).
+    On S3: a single conditional PUT — ``If-Match: token`` when the partition existed,
+    ``If-None-Match: *`` when it did not. Returns ``False`` when S3 refused the write because
+    the object changed; any other failure propagates.
     """
     if isinstance(fs, LocalFileSystem):
         directory = os.path.dirname(path)
@@ -138,9 +193,37 @@ def _write_atomic(fs: fsspec.AbstractFileSystem, path: str, data: bytes) -> None
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
+        return True
+    bucket, key = path.split("/", 1)
+    condition = {"IfMatch": token} if token else {"IfNoneMatch": "*"}
+    try:
+        fs.call_s3("put_object", Bucket=bucket, Key=key, Body=data, **condition)
+    except OSError as error:
+        if _is_precondition_failure(error):
+            return False
+        raise
+    finally:
+        fs.invalidate_cache(path)
+    return True
+
+
+# @spec OBS-ARCHIVE-025
+@contextlib.contextmanager
+def _partition_lock(fs: fsspec.AbstractFileSystem, path: str) -> Iterator[None]:
+    """Exclusive access to one local partition across read-merge-write; a no-op on S3, where
+    the conditional write provides the guarantee instead."""
+    if not isinstance(fs, LocalFileSystem):
+        yield
         return
-    with fs.open(path, "wb") as handle:
-        handle.write(data)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    lock_path = os.path.join(directory, f".{os.path.basename(path)}.lock")
+    with open(lock_path, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 # --- partition primitives ------------------------------------------------------------------
@@ -159,6 +242,45 @@ def _render_keys(frame: pd.DataFrame, product: Product) -> pd.DataFrame:
 def _partition_path(root: str, product: Product, keys: dict[str, str]) -> str:
     segments = [f"{name}={value}" for name, value in keys.items()]
     return _join(root, product.prefix, *segments, product.filename)
+
+
+def _merge(
+    existing: pd.DataFrame | None, incoming: pd.DataFrame, product: Product, crs: Any
+) -> pd.DataFrame:
+    """Incoming rows replace stored rows with the same key; the result is sorted and validated."""
+    if existing is not None:
+        incoming_keys = incoming[product.key_cols].apply(tuple, axis=1)
+        existing_keys = existing[product.key_cols].apply(tuple, axis=1)
+        kept = existing[~existing_keys.isin(set(incoming_keys))]
+        merged = pd.concat([kept, incoming], ignore_index=True)
+    else:
+        merged = incoming
+    merged = merged.sort_values(product.key_cols, kind="stable").reset_index(drop=True)
+    if product.has_geometry:
+        merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=crs)
+    return validate_partition(merged, product.frame_model)
+
+
+# @spec OBS-ARCHIVE-024, OBS-ARCHIVE-026
+def _write_partition(
+    fs: fsspec.AbstractFileSystem, path: str, incoming: pd.DataFrame, product: Product, crs: Any
+) -> None:
+    """Read-merge-write one partition so that no concurrent writer's rows are lost.
+
+    Locally the whole step runs under the partition lock. On S3 the write is conditional on
+    the token from the read; a refusal means another writer landed first, so the partition is
+    re-read and the merge redone, up to ``MAX_WRITE_ATTEMPTS`` times.
+    """
+    with _partition_lock(fs, path):
+        for attempt in range(1, MAX_WRITE_ATTEMPTS + 1):
+            existing, token = _read_current(fs, path, product)
+            merged = _merge(existing, incoming, product, crs)
+            if _write_atomic(fs, path, _encode(merged, product), token):
+                return
+            log.info("partition changed under writer (attempt %d): %s", attempt, path)
+    raise ConcurrentWriteError(
+        f"partition {path} changed under this writer on every one of {MAX_WRITE_ATTEMPTS} attempts"
+    )
 
 
 # @spec OBS-ARCHIVE-005, OBS-ARCHIVE-006, OBS-ARCHIVE-007, OBS-ARCHIVE-008, OBS-ARCHIVE-010
@@ -192,19 +314,8 @@ def write_partitioned(frame: pd.DataFrame, archive_uri: str | None, product: Pro
         partition_keys = dict(zip(key_names, values, strict=True))
         path = _partition_path(root, product, partition_keys)
         incoming = validated.loc[index]
-        if fs.exists(path):
-            existing = _read_partition(fs, path, product)
-            merged_keys = incoming[product.key_cols].apply(tuple, axis=1)
-            existing_keys = existing[product.key_cols].apply(tuple, axis=1)
-            kept = existing[~existing_keys.isin(set(merged_keys))]
-            merged = pd.concat([kept, incoming], ignore_index=True)
-        else:
-            merged = incoming
-        merged = merged.sort_values(product.key_cols, kind="stable").reset_index(drop=True)
-        if product.has_geometry:
-            merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=validated.crs)
-        merged = validate_partition(merged, product.frame_model)
-        _write_atomic(fs, path, _encode(merged, product))
+        crs = validated.crs if product.has_geometry else None
+        _write_partition(fs, path, incoming, product, crs)
         written.append(
             _join(
                 archive_uri,

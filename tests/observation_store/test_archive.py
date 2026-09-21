@@ -183,7 +183,11 @@ def test_failed_write_leaves_previous_partition_intact(archive_dir):
     finally:
         partition.chmod(stat.S_IRWXU)
     assert (partition / "observations.parquet").read_bytes() == before
-    assert [p.name for p in partition.iterdir()] == ["observations.parquet"]
+    # only the partition and its lock file (OBS-ARCHIVE-025); no temporary file survives
+    assert {p.name for p in partition.iterdir()} == {
+        "observations.parquet",
+        ".observations.parquet.lock",
+    }
 
 
 # @spec OBS-ARCHIVE-009
@@ -191,7 +195,11 @@ def test_no_temporary_files_remain_after_a_write(archive_dir):
     records = [make_observation(), make_observation(observed_at=T0 + DAY)]
     write_observations(records, str(archive_dir))
     write_sites([make_site()], str(archive_dir))
-    leftovers = [p for p in archive_dir.rglob("*") if p.is_file() and p.suffix != ".parquet"]
+    leftovers = [
+        p
+        for p in archive_dir.rglob("*")
+        if p.is_file() and p.suffix not in (".parquet", ".lock")  # lock files: OBS-ARCHIVE-025
+    ]
     assert leftovers == []
 
 
@@ -390,3 +398,122 @@ def test_empty_read_returns_typed_empty_frame_and_logs(populated, caplog):
     assert set(frame.columns) == set(ObservationsFrame.to_schema().columns)
     assert any("no partition" in r.getMessage().lower() for r in caplog.records)
     assert len(read_sites(populated + "/does-not-exist")) == 0
+
+
+# --- One writer per partition (OBS-ARCHIVE-023..026) ---------------------------
+
+
+def _race(monkeypatch, competing, archive_uri, times=1):
+    """Let a competing writer land between the first writer's read and its write.
+
+    Wraps ``archive._read_current``: each of the outer writer's first ``times`` reads is followed
+    by a competing ``write_partitioned`` of ``competing(k)`` (``k`` = 0, 1, …) to the same
+    partition. Returns the list of outer reads, for counting retries.
+    """
+    real = archive._read_current
+    reads: list = []
+    state = {"inner": False}
+
+    def hooked(fs, path, product):
+        result = real(fs, path, product)
+        if state["inner"]:
+            return result
+        reads.append(path)
+        if len(reads) <= times:
+            state["inner"] = True
+            try:
+                write_partitioned(toy_frame(competing(len(reads) - 1)), archive_uri, TOY)
+            finally:
+                state["inner"] = False
+        return result
+
+    monkeypatch.setattr(archive, "_read_current", hooked)
+    return reads
+
+
+OURS = [("a", "2026-09-20T10:00", 1.0), ("a", "2026-09-20T11:00", 2.0)]
+THEIRS = [("b", "2026-09-20T10:00", 9.0)]
+
+
+# @spec OBS-ARCHIVE-023
+# @spec OBS-ARCHIVE-024
+# @spec OBS-ARCHIVE-026
+@pytest.mark.parametrize("pre_existing", [True, False])
+def test_s3_write_refused_when_partition_changed_is_re_merged(
+    s3_archive_uri, monkeypatch, pre_existing
+):
+    if pre_existing:
+        write_partitioned(toy_frame([("c", "2026-09-20T09:00", 0.0)]), s3_archive_uri, TOY)
+    reads = _race(monkeypatch, lambda k: THEIRS, s3_archive_uri)
+    write_partitioned(toy_frame(OURS), s3_archive_uri, TOY)
+    stored = read_partitioned(s3_archive_uri, TOY)
+    expected = {"a", "b"} | ({"c"} if pre_existing else set())
+    assert set(stored["site_id"]) == expected
+    assert len(stored) == len(OURS) + len(THEIRS) + (1 if pre_existing else 0)
+    assert len(reads) == 2  # the initial read and exactly one re-read after the refusal
+
+
+# @spec OBS-ARCHIVE-024
+def test_s3_write_gives_up_after_five_refusals_naming_the_partition(s3_archive_uri, monkeypatch):
+    # every competing write adds a new row, so the object changes before each of our attempts
+    reads = _race(
+        monkeypatch, lambda k: [(f"x{k}", "2026-09-20T10:00", float(k))], s3_archive_uri, times=10
+    )
+    with pytest.raises(archive.ConcurrentWriteError, match="toy/values/date=2026-09-20"):
+        write_partitioned(toy_frame(OURS), s3_archive_uri, TOY)
+    assert len(reads) == 5
+    stored = read_partitioned(s3_archive_uri, TOY)
+    assert "a" not in set(stored["site_id"])  # ours never landed; the competitors' rows did
+    assert len(stored) == 5
+
+
+# @spec OBS-ARCHIVE-025
+# @spec OBS-ARCHIVE-026
+def test_local_concurrent_writers_are_serialized_by_the_lock(archive_dir, monkeypatch):
+    import threading
+    import time
+
+    archive_dir = str(archive_dir)
+
+    real = archive._read_current
+    started = threading.Barrier(2)
+
+    def slow_read(fs, path, product):
+        result = real(fs, path, product)
+        time.sleep(0.3)  # widen the read-to-write gap so an unlocked writer would overlap
+        return result
+
+    monkeypatch.setattr(archive, "_read_current", slow_read)
+    errors: list[BaseException] = []
+
+    def writer(rows):
+        try:
+            started.wait()
+            write_partitioned(toy_frame(rows), archive_dir, TOY)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=writer, args=(OURS,)),
+        threading.Thread(target=writer, args=(THEIRS,)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    stored = read_partitioned(archive_dir, TOY)
+    assert len(stored) == len(OURS) + len(THEIRS)
+    assert set(stored["site_id"]) == {"a", "b"}
+
+
+# @spec OBS-ARCHIVE-025
+def test_lock_file_is_beside_the_partition_and_never_read(archive_dir):
+    archive_dir = str(archive_dir)
+    write_partitioned(toy_frame(OURS), archive_dir, TOY)
+    directory = os.path.join(archive_dir, "toy/values/date=2026-09-20")
+    assert ".values.parquet.lock" in os.listdir(directory)
+    assert len(read_partitioned(archive_dir, TOY)) == len(OURS)
+    write_sites([make_site()], archive_dir)
+    assert ".sites.parquet.lock" in os.listdir(os.path.join(archive_dir, "source=purpleair"))
+    assert len(read_sites(archive_dir)) == 1

@@ -265,9 +265,11 @@ Cron on Actions is best-effort — a run can start minutes late under load — a
 interval is far coarser than PurpleAir's two-minute native cadence. That is acceptable because no
 consumer needs the native cadence: calibration aggregates PurpleAir to hours and imposes no
 minimum snapshot count, so a few snapshots per hour suffice, and every run's window overlaps its
-predecessor so a late or skipped run is recovered by the next. Runs of one workflow are serialized
-by a concurrency group, honouring the archive's single-writer-per-partition assumption; different
-workflows write disjoint partitions.
+predecessor so a late or skipped run is recovered by the next. Concurrent runs are safe from any
+trigger because the archive itself guarantees one writer per partition (the store's writes are
+compare-and-swap: a partition changed under a writer is re-read and re-merged, never
+overwritten); concurrency groups serialize each workflow with itself only so that two runs over
+the same window do not both spend runner minutes.
 
 Alternatives: a resident poller in the Codespace was rejected because the Codespace idles out. An
 AWS-side schedule (EventBridge driving a container that runs the same entry point) would give
@@ -281,8 +283,9 @@ sit on the same entry points.
 ### Persistence: GeoParquet archive as system of record, PostGIS as serving layer
 
 Point observations are written to a partitioned GeoParquet archive in S3 (durable, reproducible,
-readable by GeoPandas/DuckDB/QGIS directly from object storage) and loaded into PostGIS (spatial
-SQL for distance-aware matching, native QGIS connectivity). Two stores cost a load step and a sync
+readable by GeoPandas/DuckDB/QGIS directly from object storage, and safe for concurrent writers
+through S3's conditional writes) and loaded into PostGIS (spatial SQL for distance-aware
+matching, native QGIS connectivity). Two stores cost a load step and a sync
 to keep tested; the alternative of PostGIS alone was rejected because the Codespace database does
 not outlive the Codespace and the archive is what makes the twin reproducible. Keeping the archive
 in the workspace or in git was rejected for the same reason plus binary churn on every run. GeoParquet alone was rejected because
