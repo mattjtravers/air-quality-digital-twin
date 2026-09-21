@@ -8,16 +8,16 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-**Design is ahead of code.** The HLD (`docs/high-level-design.md`) and four leaf LLDs under
-`docs/intent/` — `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`),
-and `calibration` (`CAL`, a later increment) — are drafted, with EARS specs and tests beside
-each. The `observation_store` segment is implemented (`src/aqdt/observation_store/`,
-`src/aqdt/registry.py`); `purpleair/`, `airnow/`, and `calibration/` are empty packages whose
-tests fail at collection until their code lands. The `[x]`/`[ ]` markers in each `*-specs.md`
-are the authoritative progress record. Read the HLD first, then the LLD for the segment being
-touched; the LLDs are the source of truth for schemas, API contracts, QC rules, and package layout
-(`src/aqdt/` with `observation_store/`, `purpleair/`, `airnow/`, `calibration/`; tests mirror it
-under `tests/`).
+The HLD (`docs/high-level-design.md`) and four leaf LLDs under `docs/intent/` —
+`observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), and
+`calibration` (`CAL`) — are drafted with EARS specs and tests beside each, and all four segments
+are implemented under `src/aqdt/` (`observation_store/`, `purpleair/`, `airnow/`,
+`calibration/`, plus `registry.py` listing every archive product in load order). The
+`[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read the
+HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
+schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
+Ingest runs are `ingest_purpleair` / `ingest_airnow`; calibration runs are `fit_calibrations` /
+`apply_calibrations`. Nothing yet schedules them.
 
 Key architectural facts to keep in mind (rationale in the HLD):
 
@@ -33,6 +33,11 @@ The devcontainer installs GDAL (`gdal-bin`, `libgdal-dev`) and `libspatialindex-
 is configured with the QGIS extension. A PostGIS sidecar runs via `.devcontainer/docker-compose.yml`
 (and as a `services:` block in CI) with `DATABASE_URL` preset; PostGIS tests skip when it is unset.
 Archive tests use a temp directory or `moto`, so no AWS credentials are needed to run the suite.
+
+## Workflow
+
+The user makes every git commit. Leave changes uncommitted at the end of a task and say what is
+ready to commit; committing is the user's code-review step.
 
 ## Commands
 

@@ -13,8 +13,8 @@ from aqdt.purpleair.qc import evaluate
 from .conftest import row_dict
 
 
-def record(snapshot, sensor_index, **overrides) -> PurpleAirSensorRecord:
-    row = row_dict(snapshot, sensor_index)
+def record(snapshot, index, **overrides) -> PurpleAirSensorRecord:
+    row = row_dict(snapshot, index)
     row.update(overrides)
     return PurpleAirSensorRecord.model_validate(row)
 

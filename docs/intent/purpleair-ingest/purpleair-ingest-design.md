@@ -165,7 +165,7 @@ variable unset fails immediately with an error naming the variable.
 
 ```
 src/aqdt/purpleair/
-  client.py     # fetch_sensors(settings) -> list[dict]
+  client.py     # fetch_sensors(settings) -> SensorSnapshot (zipped rows + data_time_stamp)
   models.py     # PurpleAirSensorRecord, PurpleAirSettings
   qc.py         # flags + correction
   ingest.py     # ingest_purpleair (entry point)

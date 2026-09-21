@@ -175,6 +175,7 @@ def test_postgis_creates_and_loads_calibration_tables(archive_uri, settings):
                 cur.execute(f"drop table if exists {product.table} cascade")
         conn.commit()
         apply_schema(conn)
+        rebuild(conn, archive_uri)  # sites and observations, as the ingesters would have loaded
         fits = fit_calibrations(archive_uri, AS_OF, settings, conn=conn)
         with conn.cursor() as cur:
             cur.execute("select count(*) from calibration_fits")

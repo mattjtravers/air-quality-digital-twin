@@ -8,17 +8,20 @@ import pytest
 from aqdt.calibration import apply as apply_module
 from aqdt.calibration.apply import apply_calibrations
 from aqdt.calibration.fit import fit_calibrations
-from aqdt.calibration.products import CALIBRATED_HOURLY, SENSOR_HOURLY
-from aqdt.calibration.schemas import FitStatus
+from aqdt.calibration.products import CALIBRATED_HOURLY, FITS, SENSOR_HOURLY
+from aqdt.calibration.schemas import CalibrationSettings, FitStatus
 from aqdt.observation_store.archive import read_partitioned
 
 from .conftest import AS_OF, DAY, M1, RELATIONS, H, monitor_value
-from .test_fit import expected_pooled
+
+# A fit applies only to hours at or after its as_of, so the fixture fits the day before AS_OF
+# (the daily refit that would have been current for the hours the tests apply to).
+FIT_AS_OF = AS_OF - 24 * H
 
 
 @pytest.fixture
 def fitted(archive_uri, settings):
-    fit_calibrations(archive_uri, AS_OF, settings)
+    fit_calibrations(archive_uri, FIT_AS_OF, settings)
     return archive_uri
 
 
@@ -53,11 +56,14 @@ def test_one_calibrated_row_per_sensor_hour_in_the_window(fitted, settings):
 # @spec CAL-APPLY-003
 def test_fitted_and_pooled_values_apply_their_own_fit(fitted, settings):
     result = by_site_hour(apply_calibrations(fitted, AS_OF - 10 * H, AS_OF - 4 * H, settings))
-    (slope, intercept, _, _), _ = expected_pooled()
+    fits = read_partitioned(fitted, FITS).set_index("site_id")
+    assert fits.loc["purpleair:2", "status"] == "pooled"
+    slope, intercept = fits.loc["purpleair:2", "slope"], fits.loc["purpleair:2", "intercept"]
     for hour in (AS_OF - 10 * H, AS_OF - 7 * H, AS_OF - 5 * H):
         y = monitor_value(hour)
         s1 = result.loc[("purpleair:1", hour)]
         assert s1["fit_status"] == "fitted"
+        assert s1["fit_as_of"] == FIT_AS_OF
         assert s1["pm25_calibrated"] == pytest.approx(y)  # 2 + 1.5 x recovers the monitor value
         s2 = result.loc[("purpleair:2", hour)]
         assert s2["fit_status"] == "pooled"
@@ -97,15 +103,13 @@ def test_the_latest_fit_at_or_before_the_hour_is_used(archive_uri, settings):
 
 # @spec CAL-APPLY-004
 def test_uncalibrated_hours_have_null_values(archive_uri, settings):
-    from aqdt.calibration.schemas import CalibrationSettings
-
-    fit_calibrations(
-        archive_uri, AS_OF, CalibrationSettings(min_pairs=500)
-    )  # every sensor uncalibrated
+    # every sensor uncalibrated
+    fit_calibrations(archive_uri, FIT_AS_OF, CalibrationSettings(min_pairs=500))
     result = by_site_hour(apply_calibrations(archive_uri, AS_OF - 3 * H, AS_OF - 1 * H, settings))
     assert (result["fit_status"] == "uncalibrated").all()
     assert result["pm25_calibrated"].isna().all()
-    assert (result["fit_as_of"] == AS_OF).all()  # fitted and found uncalibrated: fit_as_of is set
+    # fitted and found uncalibrated: fit_as_of is set
+    assert (result["fit_as_of"] == FIT_AS_OF).all()
 
     never = by_site_hour(
         apply_calibrations(archive_uri, AS_OF - 30 * DAY, AS_OF - 30 * DAY + H, settings)

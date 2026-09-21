@@ -27,7 +27,7 @@ correction; their value is the reference. Like every ingester, it flags rather t
 |---|---|
 | Endpoint | `GET https://www.airnowapi.org/aq/data/` |
 | Auth | `API_KEY` query parameter from `AIRNOW_API_KEY` |
-| Spatial filter | `BBOX=minLon,minLat,maxLon,maxLat` from the project bounding box (`selng,selat,nwlng,nwlat`) |
+| Spatial filter | `BBOX=minLon,minLat,maxLon,maxLat` from the project bounding box (`nwlng,selat,selng,nwlat`) |
 | Time window | `startDate = start`, `endDate = end − 1 h`, as `YYYY-MM-DDTHH` UTC; the API's hours are inclusive, the project's windows are half-open `[start, end)` |
 | Parameter | `parameters=PM25` |
 | Data type | `dataType=B` (concentration and AQI) |

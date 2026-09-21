@@ -5,7 +5,8 @@ load, and in what order: sites first, then observations, then each downstream co
 products. A component adds its products here and nowhere else.
 """
 
+from aqdt.calibration.products import CALIBRATED_HOURLY, FITS, SENSOR_HOURLY
 from aqdt.observation_store.products import OBSERVATIONS, SITES, Product
 
-# @spec OBS-PG-012
-PRODUCTS: list[Product] = [SITES, OBSERVATIONS]
+# @spec OBS-PG-012, CAL-STORE-007
+PRODUCTS: list[Product] = [SITES, OBSERVATIONS, SENSOR_HOURLY, FITS, CALIBRATED_HOURLY]

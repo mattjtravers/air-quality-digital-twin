@@ -251,8 +251,11 @@ def test_fit_run_is_deterministic(archive_uri, settings):
 # @spec CAL-RUN-005
 def test_refit_after_archive_change_replaces_the_fit(archive_uri, settings):
     fit_calibrations(archive_uri, AS_OF, settings)
-    # M1 revises every hour upward by 10: S1's intercept moves from 2 to 12
-    revised = [monitor_obs(M1, hour, monitor_value(hour) + 10) for hour in fit_hours(100)]
+    # M1 revises every hour in the window upward by 10: S1's intercept moves from 2 to 12
+    revised = [
+        monitor_obs(M1, hour, monitor_value(hour) + 10)
+        for hour in [*fit_hours(100), AS_OF - 30 * DAY]
+    ]
     write_observations(revised, archive_uri)
     fit_calibrations(archive_uri, AS_OF, settings)
     fits = read_partitioned(archive_uri, FITS)
