@@ -1,0 +1,24 @@
+# @spec OBS-ENV-003
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/python:3.12-bookworm
+    volumes:
+      - ..:/workspaces/air-quality-digital-twin:cached
+    command: sleep infinity
+    environment:
+      DATABASE_URL: postgresql://aqdt:aqdt@postgis:5432/aqdt
+    depends_on:
+      - postgis
+
+  postgis:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aqdt
+      POSTGRES_PASSWORD: aqdt
+      POSTGRES_DB: aqdt
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
+
+volumes:
+  postgis-data:

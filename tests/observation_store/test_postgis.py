@@ -264,8 +264,8 @@ def test_load_partitions_updates_existing_rows(conn, archive):
     uri, sites, observations = archive
     load_partitions(conn, uri, [*sites, *observations])
     revised = make_observation(site_id="purpleair:1", observed_at=T0, pm25_raw=42.0)
-    write_observations([revised], uri)
-    load_partitions(conn, uri, observations[:1])
+    revised_partitions = write_observations([revised], uri)
+    load_partitions(conn, uri, revised_partitions)
     with conn.cursor() as cur:
         cur.execute(
             "select pm25_raw, qc_flags from observations where site_id = %s and observed_at = %s",

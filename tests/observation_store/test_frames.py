@@ -89,7 +89,7 @@ def _compatible(annotation, dtype: str) -> bool:
     if inner is int:
         return "int" in dtype
     if inner is str or (isinstance(inner, type) and issubclass(inner, enum.Enum)):
-        return dtype in ("str", "string", "object", "string[python]")
+        return dtype == "object" or dtype.startswith(("str", "string"))
     if inner is datetime.datetime:
         return "datetime64" in dtype and "UTC" in dtype
     if origin in (list, dict):

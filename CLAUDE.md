@@ -10,12 +10,14 @@ incrementally as weekly assignments; each increment lands as a coherent, tested 
 
 **Design is ahead of code.** The HLD (`docs/high-level-design.md`) and four leaf LLDs under
 `docs/intent/` — `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`),
-and `calibration` (`CAL`, a later increment) — are drafted. EARS specs, tests, and application
-code for those segments do not exist yet; the only test is a placeholder. Check the file tree
-before claiming any module exists. Read the HLD first, then the LLD for the segment being touched;
-the LLDs are the source of truth for schemas, API contracts, QC rules, and package layout
-(planned: `src/aqdt/` with `observation_store/`, `purpleair/`, `airnow/`, `calibration/`; tests
-mirror it under `tests/`).
+and `calibration` (`CAL`, a later increment) — are drafted, with EARS specs and tests beside
+each. The `observation_store` segment is implemented (`src/aqdt/observation_store/`,
+`src/aqdt/registry.py`); `purpleair/`, `airnow/`, and `calibration/` are empty packages whose
+tests fail at collection until their code lands. The `[x]`/`[ ]` markers in each `*-specs.md`
+are the authoritative progress record. Read the HLD first, then the LLD for the segment being
+touched; the LLDs are the source of truth for schemas, API contracts, QC rules, and package layout
+(`src/aqdt/` with `observation_store/`, `purpleair/`, `airnow/`, `calibration/`; tests mirror it
+under `tests/`).
 
 Key architectural facts to keep in mind (rationale in the HLD):
 
@@ -28,8 +30,9 @@ Key architectural facts to keep in mind (rationale in the HLD):
   the `observation-store` LLD § Environment for the variable list.
 
 The devcontainer installs GDAL (`gdal-bin`, `libgdal-dev`) and `libspatialindex-dev`, and VS Code
-is configured with the QGIS extension. The PostGIS sidecar and the S3 archive described in the
-LLDs are not yet wired into the devcontainer or CI.
+is configured with the QGIS extension. A PostGIS sidecar runs via `.devcontainer/docker-compose.yml`
+(and as a `services:` block in CI) with `DATABASE_URL` preset; PostGIS tests skip when it is unset.
+Archive tests use a temp directory or `moto`, so no AWS credentials are needed to run the suite.
 
 ## Commands
 

@@ -183,7 +183,7 @@ wheels = [
 [[package]]
 name = "air-quality-digital-twin"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fsspec" },
     { name = "geopandas" },

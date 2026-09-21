@@ -10,6 +10,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # @spec OBS-ENV-007
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: aqdt
+          POSTGRES_PASSWORD: aqdt
+          POSTGRES_DB: aqdt
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aqdt"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://aqdt:aqdt@localhost:5432/aqdt
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4

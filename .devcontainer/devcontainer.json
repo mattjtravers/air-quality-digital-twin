@@ -1,5 +1,9 @@
 {
    "name": "Air Quality Digital Twin",
+   "dockerComposeFile": "docker-compose.yml",
+   "service": "app",
+   "workspaceFolder": "/workspaces/air-quality-digital-twin",
+   "shutdownAction": "stopCompose",
    "features": {
       "ghcr.io/jsburckhardt/devcontainer-features/uv:1": {},
       "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
