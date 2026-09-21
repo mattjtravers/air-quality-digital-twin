@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from aqdt.observation_store.schemas import BoundingBox
+from aqdt.observation_store.schemas import DC_METRO, BoundingBox
 
 MISSING_SENTINEL = -999  # AirNow's missing-value marker
 PARAMETER = "PM2.5"
@@ -92,7 +92,7 @@ class AirNowSettings(BaseSettings):
     )
 
     api_key: str = Field(validation_alias="AIRNOW_API_KEY")
-    bbox: Annotated[BoundingBox, NoDecode] = Field(validation_alias="AQDT_BBOX")
+    bbox: Annotated[BoundingBox, NoDecode] = Field(default=DC_METRO, validation_alias="AQDT_BBOX")
     flatline_hours: int = Field(default=3, ge=1)
     base_url: str = "https://www.airnowapi.org/aq/data/"
     timeout_seconds: float = 30

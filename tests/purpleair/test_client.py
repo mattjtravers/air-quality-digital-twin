@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from aqdt.observation_store.schemas import BoundingBox
+from aqdt.observation_store.schemas import DC_METRO, BoundingBox
 from aqdt.purpleair.client import fetch_sensors
 from aqdt.purpleair.models import PurpleAirSettings
 
@@ -132,10 +132,12 @@ def test_only_the_snapshot_endpoint_is_used(settings, recorder):
 # @spec PA-CFG-001
 def test_settings_read_key_and_bbox_from_environment(monkeypatch):
     monkeypatch.setenv("PURPLEAIR_API_KEY", "k")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
+    monkeypatch.delenv("AQDT_BBOX", raising=False)
     s = PurpleAirSettings()
     assert s.api_key == "k"
-    assert s.bbox == BoundingBox(nwlng=-77.5, nwlat=39.1, selng=-76.7, selat=38.7)
+    assert s.bbox == DC_METRO
+    monkeypatch.setenv("AQDT_BBOX", "-78.0,39.5,-76.5,38.5")
+    assert PurpleAirSettings().bbox == BoundingBox(nwlng=-78.0, nwlat=39.5, selng=-76.5, selat=38.5)
     assert s.base_url == "https://api.purpleair.com/v1/sensors"
     assert s.timeout_seconds == 30
     assert s.max_attempts == 3
@@ -146,12 +148,9 @@ def test_settings_read_key_and_bbox_from_environment(monkeypatch):
 
 
 # @spec PA-CFG-002
-@pytest.mark.parametrize("missing", ["PURPLEAIR_API_KEY", "AQDT_BBOX"])
-def test_missing_required_variable_fails_naming_it(monkeypatch, missing):
-    monkeypatch.setenv("PURPLEAIR_API_KEY", "k")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
-    monkeypatch.delenv(missing)
-    with pytest.raises(ValidationError, match=missing):
+def test_missing_api_key_fails_naming_it(monkeypatch):
+    monkeypatch.delenv("PURPLEAIR_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match="PURPLEAIR_API_KEY"):
         PurpleAirSettings()
 
 

@@ -156,10 +156,10 @@ A run is a snapshot, not a window: each sensor contributes at most one observati
 `(site_id, observed_at)` and the store's merge makes the second a no-op for that sensor. History
 accumulates by running repeatedly; the per-sensor `/sensors/:id/history` endpoint is not used.
 
-Settings (`PurpleAirSettings`, Pydantic settings from the environment): `PURPLEAIR_API_KEY`,
-`AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`), and the constants
-in the API contract table as overridable defaults. Constructing the settings with either required
-variable unset fails immediately with an error naming the variable.
+Settings (`PurpleAirSettings`, Pydantic settings from the environment): `PURPLEAIR_API_KEY`
+(required), `bbox` (the store's `DC_METRO` unless `AQDT_BBOX`, `nwlng,nwlat,selng,selat`,
+overrides it), and the constants in the API contract table as overridable defaults. Constructing
+the settings with the API key unset fails immediately with an error naming the variable.
 
 ## Package Layout
 

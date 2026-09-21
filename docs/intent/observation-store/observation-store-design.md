@@ -117,8 +117,12 @@ observation handed to the store or a counted rejection. The model enforces it, a
 
 ### BoundingBox
 
-The spatial extent every ingester queries, parsed once from `AQDT_BBOX`
-(`nwlng,nwlat,selng,selat`, WGS84) by `BoundingBox.parse`. Validation: each coordinate in range, `nwlat > selat`,
+The spatial extent every ingester queries. The project's extent is a constant of the store,
+`DC_METRO` — NW corner `(-77.5, 39.1)`, SE corner `(-76.7, 38.7)`, WGS84 — because the extent is
+what the project *is*, not a deployment detail, and belongs in versioned code where a reader can
+find it. An ingester's settings default to `DC_METRO` and take `AQDT_BBOX`
+(`nwlng,nwlat,selng,selat`, parsed by `BoundingBox.parse`) as an environment override for
+experiments over another extent. Validation: each coordinate in range, `nwlat > selat`,
 `nwlng < selng`. Lives here because it is part of the canonical geospatial vocabulary rather than
 any one source's contract; each ingester renders it into its own API's parameter names.
 
@@ -355,9 +359,11 @@ is `DATABASE_URL` from the environment (docker-compose default in the Codespace)
 
   | Variable | Purpose | Where set |
   |---|---|---|
-  | `AQDT_ARCHIVE_URI` | Archive root (`s3://bucket/prefix`) | Codespaces secret |
-  | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` | S3 credentials | Codespaces secrets |
-  | `DATABASE_URL` | PostGIS connection | docker-compose default |
+  | `AQDT_ARCHIVE_URI` | Archive root (`s3://bucket/prefix`) | Codespaces secret; repository variable on Actions |
+  | `AQDT_BBOX` | Optional override of the `DC_METRO` extent | Unset in normal operation |
+  | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | S3 credentials | Codespaces secrets; repository secrets on Actions |
+  | `AWS_DEFAULT_REGION` | S3 region | Codespaces secret; repository variable on Actions |
+  | `DATABASE_URL` | PostGIS connection | docker-compose default; unset on Actions runners |
 
   An archive operation invoked without an explicit `archive_uri` reads `AQDT_ARCHIVE_URI`; if it
   is unset the operation fails immediately with an error naming the variable, rather than falling
@@ -447,6 +453,12 @@ tests/
 4. A source renumbering an existing site (a new native identifier for the same physical location)
    would leave earlier observations under the old `site_id`. No evidence either source does this;
    revisit if it appears.
+5. Enforce single-writer-per-partition inside `write_partitioned` rather than leaving it to the
+   caller: compare-and-swap on the partition object (`If-Match` on the ETag read during the
+   merge, `If-None-Match: *` on create, re-read and re-merge on `412`) on S3, and an advisory
+   file lock across the read-merge-write locally. Scheduled runs are now the writers, and a
+   trigger-level serialization (Actions concurrency groups) cannot cover a run started by hand or
+   by a future orchestrator. Next slice after the pipeline segment lands.
 
 ## References
 

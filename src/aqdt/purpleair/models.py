@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from aqdt.observation_store.schemas import BoundingBox
+from aqdt.observation_store.schemas import DC_METRO, BoundingBox
 
 FIELDS = [
     "sensor_index",
@@ -71,7 +71,7 @@ class PurpleAirSettings(BaseSettings):
     )
 
     api_key: str = Field(validation_alias="PURPLEAIR_API_KEY")
-    bbox: Annotated[BoundingBox, NoDecode] = Field(validation_alias="AQDT_BBOX")
+    bbox: Annotated[BoundingBox, NoDecode] = Field(default=DC_METRO, validation_alias="AQDT_BBOX")
     base_url: str = "https://api.purpleair.com/v1/sensors"
     timeout_seconds: float = 30
     max_attempts: int = Field(default=3, ge=1)

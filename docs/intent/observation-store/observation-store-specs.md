@@ -26,6 +26,7 @@ frame models), `ARCHIVE` (GeoParquet archive layout, writes, reads, and the part
 - [x] **OBS-SCHEMA-013**: The observation store shall expose `Observation.from_frame(frame)`, which shall return the `Observation` records for every row of a validated `ObservationsFrame`.
 - [x] **OBS-SCHEMA-014**: Every `IngestSummary` an ingester returns shall satisfy `fetched == written + sum(rejected.values())`, so that every source row is accounted for as either an observation handed to the store or a counted boundary rejection.
 - [x] **OBS-SCHEMA-015**: Every time window the observation store accepts or reports (`read_observations`, `IngestSummary.window_start`/`window_end`, and downstream windows) shall be half-open: `start` is included and `end` is excluded.
+- [x] **OBS-SCHEMA-016**: The observation store shall define the constant `DC_METRO`, a `BoundingBox` with NW corner `(-77.5, 39.1)` and SE corner `(-76.7, 38.7)`, as the project's default extent.
 
 ## QC Flag Vocabulary
 

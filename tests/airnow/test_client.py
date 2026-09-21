@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from aqdt.airnow.client import fetch_rows
 from aqdt.airnow.models import AirNowSettings
-from aqdt.observation_store.schemas import BoundingBox
+from aqdt.observation_store.schemas import DC_METRO, BoundingBox
 
 from .conftest import FIXTURES, Replay, hour, load
 
@@ -136,10 +136,12 @@ def test_rows_are_returned_as_received(settings, replay):
 # @spec AN-CFG-001
 def test_settings_from_environment_with_overridable_defaults(monkeypatch):
     monkeypatch.setenv("AIRNOW_API_KEY", "k")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
+    monkeypatch.delenv("AQDT_BBOX", raising=False)
     s = AirNowSettings()
     assert s.api_key == "k"
-    assert s.bbox == BoundingBox(nwlng=-77.5, nwlat=39.1, selng=-76.7, selat=38.7)
+    assert s.bbox == DC_METRO
+    monkeypatch.setenv("AQDT_BBOX", "-78.0,39.5,-76.5,38.5")
+    assert AirNowSettings().bbox == BoundingBox(nwlng=-78.0, nwlat=39.5, selng=-76.5, selat=38.5)
     assert s.flatline_hours == 3
     assert s.base_url == "https://www.airnowapi.org/aq/data/"
     assert s.timeout_seconds == 30
@@ -149,12 +151,9 @@ def test_settings_from_environment_with_overridable_defaults(monkeypatch):
 
 
 # @spec AN-CFG-002
-@pytest.mark.parametrize("missing", ["AIRNOW_API_KEY", "AQDT_BBOX"])
-def test_missing_required_variable_fails_naming_it(monkeypatch, missing):
-    monkeypatch.setenv("AIRNOW_API_KEY", "k")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
-    monkeypatch.delenv(missing)
-    with pytest.raises(ValidationError, match=missing):
+def test_missing_api_key_fails_naming_it(monkeypatch):
+    monkeypatch.delenv("AIRNOW_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match="AIRNOW_API_KEY"):
         AirNowSettings()
 
 

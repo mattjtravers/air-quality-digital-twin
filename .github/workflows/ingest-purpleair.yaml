@@ -1,0 +1,49 @@
+# @spec PIPE-SCHED-001, PIPE-SCHED-002, PIPE-SCHED-003, PIPE-SCHED-004, PIPE-SCHED-005, PIPE-SCHED-007, PIPE-SCHED-008, PIPE-SCHED-009, PIPE-CFG-001
+# Scheduled runs are skipped until the repository variable AQDT_SCHEDULES_ENABLED is "true";
+# manual (workflow_dispatch) runs always run. Runners have no PostGIS: the archive is the output.
+name: ingest-purpleair
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ingest-purpleair
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch' || vars.AQDT_SCHEDULES_ENABLED == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install the project
+        run: uv sync --no-dev
+
+      - name: ingest-purpleair
+        env:
+          PURPLEAIR_API_KEY: ${{ secrets.PURPLEAIR_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          AQDT_ARCHIVE_URI: ${{ vars.AQDT_ARCHIVE_URI }}
+        run: |
+          uv run aqdt ingest purpleair

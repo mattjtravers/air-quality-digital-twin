@@ -236,6 +236,13 @@ def test_invalid_bounding_box_is_rejected(text):
         BoundingBox.parse(text)
 
 
+# @spec OBS-SCHEMA-016
+def test_dc_metro_is_the_default_extent():
+    from aqdt.observation_store.schemas import DC_METRO
+
+    assert DC_METRO == BoundingBox(nwlng=-77.5, nwlat=39.1, selng=-76.7, selat=38.7)
+
+
 # --- from_frame ---------------------------------------------------------------
 
 

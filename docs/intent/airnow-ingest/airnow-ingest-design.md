@@ -177,10 +177,10 @@ window. A response with zero rows is a successful run reporting `fetched=0`.
 to the requested (unextended) half-open window and `snapshot_at` unset. `written` counts every
 fetched hour handed to the store, lookback hours included, so `fetched == written + Σ rejected`.
 
-Settings (`AirNowSettings`, Pydantic settings from the environment): `AIRNOW_API_KEY`,
-`AQDT_BBOX` (parsed into the store's `BoundingBox`), `flatline_hours`, and the constants in the
-API contract table as overridable defaults. Constructing the settings with either required
-variable unset fails immediately with an error naming the variable.
+Settings (`AirNowSettings`, Pydantic settings from the environment): `AIRNOW_API_KEY`
+(required), `bbox` (the store's `DC_METRO` unless `AQDT_BBOX` overrides it), `flatline_hours`,
+and the constants in the API contract table as overridable defaults. Constructing the settings
+with the API key unset fails immediately with an error naming the variable.
 
 ## Package Layout
 

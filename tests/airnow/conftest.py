@@ -79,7 +79,7 @@ class Replay:
 @pytest.fixture
 def settings(monkeypatch) -> AirNowSettings:
     monkeypatch.setenv("AIRNOW_API_KEY", "test-airnow-key")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
+    monkeypatch.delenv("AQDT_BBOX", raising=False)
     return AirNowSettings(retry_backoff_seconds=0)
 
 

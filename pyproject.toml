@@ -19,6 +19,10 @@ dependencies = [
     "shapely>=2.1.2",
 ]
 
+# @spec PIPE-CLI-001
+[project.scripts]
+aqdt = "aqdt.pipeline.cli:main"
+
 # @spec OBS-ENV-008
 [build-system]
 requires = ["hatchling"]
@@ -32,6 +36,7 @@ dev = [
     "boto3>=1.43.75",
     "moto[s3,server]>=5.2.3",
     "pytest==9.1.1",
+    "pyyaml>=6.0",
     "ruff==0.16.8",
 ]
 

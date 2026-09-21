@@ -191,3 +191,9 @@ class BoundingBox(BaseModel):
     def parse(cls, text: str) -> BoundingBox:
         """Parse the ``AQDT_BBOX`` form ``nwlng,nwlat,selng,selat``."""
         return cls.model_validate(text)
+
+
+# @spec OBS-SCHEMA-016
+DC_METRO = BoundingBox(nwlng=-77.5, nwlat=39.1, selng=-76.7, selat=38.7)
+"""The project's extent: the Washington, D.C. metro. Ingester settings default to it; ``AQDT_BBOX``
+overrides it for an experiment over another extent."""

@@ -72,7 +72,7 @@ canonical records), `RUN` (the `ingest_airnow` entry point and summary), `CFG` (
 
 ## Settings
 
-- [x] **AN-CFG-001**: The AirNow ingester shall define `AirNowSettings` (Pydantic settings) that reads `AIRNOW_API_KEY` and `AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`) from the environment, exposes `flatline_hours` (default 3) as an overridable setting, and exposes the endpoint URL, timeout, retry count, chunk length, and fixed query parameters as overridable defaults.
-- [x] **AN-CFG-002**: If `AIRNOW_API_KEY` or `AQDT_BBOX` is unset when `AirNowSettings` is constructed, then the AirNow ingester shall fail with an error naming the missing variable.
+- [x] **AN-CFG-001**: The AirNow ingester shall define `AirNowSettings` (Pydantic settings) that reads `AIRNOW_API_KEY` from the environment, sets `bbox` to the store's `DC_METRO` unless `AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`) is set in the environment, exposes `flatline_hours` (default 3) as an overridable setting, and exposes the endpoint URL, timeout, retry count, chunk length, and fixed query parameters as overridable defaults.
+- [x] **AN-CFG-002**: If `AIRNOW_API_KEY` is unset when `AirNowSettings` is constructed, then the AirNow ingester shall fail with an error naming the missing variable.
 - [x] **AN-CFG-003**: The AirNow ingester shall read no configuration from a file in the repository.
 - [x] **AN-CFG-004**: AirNow ingester tests shall exercise the client against recorded response fixtures under `tests/fixtures/airnow/` (at least: a clean response, a flatline, and malformed AQS codes) through a mocked HTTP transport, and shall make no network requests.

@@ -56,5 +56,5 @@ def recorder(snapshot):
 @pytest.fixture
 def settings(monkeypatch) -> PurpleAirSettings:
     monkeypatch.setenv("PURPLEAIR_API_KEY", "test-read-key")
-    monkeypatch.setenv("AQDT_BBOX", "-77.5,39.1,-76.7,38.7")
+    monkeypatch.delenv("AQDT_BBOX", raising=False)
     return PurpleAirSettings(retry_backoff_seconds=0)

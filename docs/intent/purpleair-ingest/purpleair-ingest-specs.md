@@ -63,7 +63,7 @@ Facets: `API` (HTTP client and request contract), `MODEL` (payload boundary mode
 
 ## Settings
 
-- [x] **PA-CFG-001**: The PurpleAir ingester shall define `PurpleAirSettings` (Pydantic settings) that reads `PURPLEAIR_API_KEY` and `AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`) from the environment, and exposes the endpoint URL, timeout, retry count, `max_age`, `location_type`, and field list as overridable defaults.
-- [x] **PA-CFG-002**: If `PURPLEAIR_API_KEY` or `AQDT_BBOX` is unset when `PurpleAirSettings` is constructed, then the PurpleAir ingester shall fail with an error naming the missing variable.
+- [x] **PA-CFG-001**: The PurpleAir ingester shall define `PurpleAirSettings` (Pydantic settings) that reads `PURPLEAIR_API_KEY` from the environment, sets `bbox` to the store's `DC_METRO` unless `AQDT_BBOX` (`nwlng,nwlat,selng,selat`, parsed into the store's `BoundingBox`) is set in the environment, and exposes the endpoint URL, timeout, retry count, `max_age`, `location_type`, and field list as overridable defaults.
+- [x] **PA-CFG-002**: If `PURPLEAIR_API_KEY` is unset when `PurpleAirSettings` is constructed, then the PurpleAir ingester shall fail with an error naming the missing variable.
 - [x] **PA-CFG-003**: The PurpleAir ingester shall read no configuration from a file in the repository.
 - [x] **PA-CFG-004**: PurpleAir ingester tests shall exercise the client against recorded snapshot fixtures under `tests/fixtures/purpleair/` (including at least one channel-B fault) through a mocked HTTP transport, and shall make no network requests.

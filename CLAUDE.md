@@ -8,26 +8,31 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-The HLD (`docs/high-level-design.md`) and four leaf LLDs under `docs/intent/` —
-`observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), and
-`calibration` (`CAL`) — are drafted with EARS specs and tests beside each, and all four segments
-are implemented under `src/aqdt/` (`observation_store/`, `purpleair/`, `airnow/`,
-`calibration/`, plus `registry.py` listing every archive product in load order). The
-`[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read the
-HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
+The HLD (`docs/high-level-design.md`) and five leaf LLDs under `docs/intent/` —
+`observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), `calibration`
+(`CAL`), and `pipeline` (`PIPE`) — are drafted with EARS specs and tests beside each, and all
+five segments are implemented under `src/aqdt/` (`observation_store/`, `purpleair/`, `airnow/`,
+`calibration/`, `pipeline/`, plus `registry.py` listing every archive product in load order).
+The `[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read
+the HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
 schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
-Ingest runs are `ingest_purpleair` / `ingest_airnow`; calibration runs are `fit_calibrations` /
-`apply_calibrations`. Nothing yet schedules them.
+Every run is invoked through the `aqdt` CLI (`aqdt ingest purpleair|airnow`, `aqdt calibrate
+fit|apply`, `aqdt db schema|rebuild`); the four `.github/workflows/{ingest-*,calibrate-*}.yaml`
+cron workflows invoke it on a schedule, gated on the repository variable
+`AQDT_SCHEDULES_ENABLED`.
 
 Key architectural facts to keep in mind (rationale in the HLD):
 
-- Runs are idempotent, time-windowed batch — no resident daemon, no orchestrator yet.
+- Runs are idempotent, time-windowed batch, scheduled by GitHub Actions cron — no resident
+  daemon, no orchestrator yet. Runners have no PostGIS; they write the S3 archive only.
 - The GeoParquet archive in S3 is the system of record; PostGIS (docker-compose sidecar in the
   Codespace) is a rebuildable cache. The Codespace and everything in it is disposable.
 - QC flags, never drops. Raw values and the raw source record are always preserved.
 - Pydantic validates records and API payloads; Pandera validates dataframes.
-- All configuration is environment variables (Codespaces secrets), never files in the repo. See
-  the `observation-store` LLD § Environment for the variable list.
+- All configuration is environment variables (Codespaces secrets; repository secrets/variables
+  on Actions), never files in the repo. The project's bounding box is a code default
+  (`DC_METRO`) that `AQDT_BBOX` may override. See the `observation-store` LLD § Environment for
+  the variable list.
 
 The devcontainer installs GDAL (`gdal-bin`, `libgdal-dev`) and `libspatialindex-dev`, and VS Code
 is configured with the QGIS extension. A PostGIS sidecar runs via `.devcontainer/docker-compose.yml`
