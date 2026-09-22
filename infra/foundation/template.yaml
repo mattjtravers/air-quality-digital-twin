@@ -1,0 +1,137 @@
+# @spec INFRA-FOUND-001, INFRA-FOUND-002, INFRA-FOUND-003, INFRA-FOUND-004, INFRA-FOUND-005,
+# @spec INFRA-FOUND-006, INFRA-FOUND-007, INFRA-FOUND-008, INFRA-FOUND-009, INFRA-FOUND-010
+#
+# The durable stack. It holds the archive — the system of record — so it is not a stack to delete
+# casually, and the bucket is retained even if it is. The dispatch stack is the disposable one.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Air quality digital twin — durable resources (archive bucket, runner identity).
+
+Parameters:
+  ArchiveBucketName:
+    Type: String
+    Default: air-quality-digital-twin-585949919812-us-east-1-archive
+    Description: >-
+      The archive bucket. Must equal aqdt.observation_store.ARCHIVE_BUCKET; a test asserts it.
+  ArchivePrefix:
+    Type: String
+    Default: dc-metro
+    Description: >-
+      Key prefix the archive lives under, and the only prefix the runner role can reach. Also the
+      path component of AQDT_ARCHIVE_URI.
+  GitHubOwner:
+    Type: String
+    Default: mattjtravers
+  GitHubRepo:
+    Type: String
+    Default: air-quality-digital-twin
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      An IAM OIDC provider is an account-level singleton per issuer URL. Set false when the
+      account already has one for GitHub Actions, and pass its ARN as GitHubOidcProviderArn.
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: An existing provider's ARN, used when CreateGitHubOidcProvider is false.
+
+Conditions:
+  ShouldCreateGitHubOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref ArchiveBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          # A PurpleAir partition is rewritten ~96 times a day; versioning without expiry would
+          # accumulate every one of those forever.
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: RemoveExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateGitHubOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-github-actions-runner"
+      Description: Assumed by this repository's workflows; reaches the archive prefix and nothing else.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref GitHubOidcProviderArn
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOwner}/${GitHubRepo}:*"
+      Policies:
+        - PolicyName: archive-prefix-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::${ArchiveBucketName}/${ArchivePrefix}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${ArchiveBucketName}"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub "${ArchivePrefix}/*"
+
+Outputs:
+  ArchiveBucketName:
+    Description: The bucket AQDT_ARCHIVE_URI must name.
+    Value: !Ref ArchiveBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-archive-bucket"
+  ArchivePrefix:
+    Description: The key prefix AQDT_ARCHIVE_URI must carry.
+    Value: !Ref ArchivePrefix
+    Export:
+      Name: !Sub "${AWS::StackName}-archive-prefix"
+  RunnerRoleArn:
+    Description: Role for GitHub Actions to assume once the workflows move off access keys.
+    Value: !GetAtt RunnerRole.Arn

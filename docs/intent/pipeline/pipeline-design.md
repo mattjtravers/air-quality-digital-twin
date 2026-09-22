@@ -85,18 +85,19 @@ require `PURPLEAIR_API_KEY`. Missing configuration fails before any request is m
 | Apply: trailing 48 h | Re-applies the hours whose sensor aggregates were still accumulating on the previous run, and repairs any hours calibrated with a stale fit because the daily fit ran late or was skipped. 48 h covers one missed daily fit with margin. |
 | Fit: most recent 00:00 UTC | Refits are daily (calibration LLD § Runs). Keying on midnight rather than "now" makes the run idempotent within the day: however late the schedule fires, the same `as_of` is refit and the same partition replaced. |
 
-## Schedules
+## Workflows and Cadence
 
-One workflow per run under `.github/workflows/`, each with a `schedule` cron trigger and a
-`workflow_dispatch` trigger (with optional `start`/`end` or `as_of` inputs; an empty input means
-"use the routine window") for manual runs and backfill:
+One workflow per run under `.github/workflows/`, each declaring `workflow_dispatch` as its only
+trigger, with optional `start`/`end` or `as_of` inputs where the command takes a window (an empty
+input means "use the routine window"). Every run reaches its workflow the same way, whether an
+EventBridge schedule dispatched it or a person did.
 
-| Workflow | Cron (UTC) | Command | Concurrency group |
+| Workflow | Cadence (UTC) | Command | Concurrency group |
 |---|---|---|---|
-| `ingest-purpleair.yaml` | `*/15 * * * *` | `aqdt ingest purpleair` | `ingest-purpleair` |
-| `ingest-airnow.yaml` | `20 * * * *` | `aqdt ingest airnow` | `ingest-airnow` |
-| `calibrate-fit.yaml` | `30 0 * * *` | `aqdt calibrate fit` | `calibrate` |
-| `calibrate-apply.yaml` | `40 * * * *` | `aqdt calibrate apply` | `calibrate` |
+| `ingest-purpleair.yaml` | every 15 minutes | `aqdt ingest purpleair` | `ingest-purpleair` |
+| `ingest-airnow.yaml` | hourly at :20 | `aqdt ingest airnow` | `ingest-airnow` |
+| `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate` |
+| `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate` |
 
 Cadence rationale: PurpleAir every 15 minutes gives about four snapshots per sensor-hour, enough
 for hourly aggregation (which imposes no minimum) at 96 requests a day. AirNow at 20 past the
@@ -104,10 +105,15 @@ hour leaves the feed time to publish the hour just ended. Fit at 00:30 runs once
 AirNow hour is archived; apply at :40 follows both ingesters each hour and, on the first hour of
 the day, the new fit.
 
+The rationale above is this component's; the cadences themselves are specified once, in the
+infrastructure segment, as the cron expressions of the EventBridge schedules that realize them —
+together with the switch that turns those schedules on and off (infrastructure LLD § Dispatch
+stack). Changing a cadence is a change there, argued from the reasoning here.
+
 Each workflow: checks out the repository, installs `uv` and the project (`uv sync --no-dev`),
-and runs the command. Every job has `timeout-minutes` under its cron interval (PurpleAir 10,
-AirNow 20, fit 30, apply 20) so a hung run cannot pile up behind itself. GitHub runs `schedule`
-triggers from the default branch only, so a schedule change takes effect when it lands on `main`.
+and runs the command. Every job has `timeout-minutes` under its cadence interval (PurpleAir 10,
+AirNow 20, fit 30, apply 20) so a hung run cannot pile up behind itself. A dispatch names the ref
+it runs from, so a workflow change takes effect when it lands on `main`.
 
 **Concurrency.** Correctness under concurrent writers is the observation store's: its partition
 writes are compare-and-swap, so a run started by a schedule, by hand, or by anything else can
@@ -126,12 +132,12 @@ repository variables: `AQDT_ARCHIVE_URI`, `AWS_DEFAULT_REGION`. The bounding box
 only what its command needs into the job environment. Nothing is written to the repository by a
 run; the archive is in S3.
 
-**Activation.** Every scheduled job is gated on the repository variable
-`AQDT_SCHEDULES_ENABLED` being `true`; a cron occurrence while it is anything else is skipped
-(reported as skipped, costing no minutes). `workflow_dispatch` runs are never gated. So the
-workflows can land on `main`, secrets and variables can be set, and each run can be exercised by
-hand from the Actions tab before one variable change turns the schedules on — and the same
-change turns them off for a maintenance window without a commit.
+**Activation.** A workflow runs whatever dispatch it receives; no job carries an activation
+condition. Because every run now arrives as a `workflow_dispatch` event, a condition here could
+not tell a scheduled run from a hand-started one, so scheduled runs are turned on and off at their
+source instead — by disabling the EventBridge schedules (infrastructure LLD § Dispatch stack).
+Running a command by hand from the Actions tab therefore works whatever state the schedules are
+in, which is what makes a maintenance window safe to hold.
 
 **Failure visibility.** A non-zero exit fails the workflow run, which GitHub surfaces in the
 Actions tab and by notification. There is no separate alerting; the HLD's falsification signal
@@ -170,7 +176,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
 | Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |
 | Retries | None at the CLI | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |
-| Activation | Job-level gate on the repository variable `AQDT_SCHEDULES_ENABLED`; dispatch runs ungated | Landing and activating are different decisions with different reviewers (code review vs. "are the secrets right?"); a variable flips without a commit and is visible in the UI, while the dispatch path stays open for manual verification. |
+| Activation | No job-level gate; scheduled runs are enabled and disabled through the EventBridge schedules' own state | Once every run arrives as a `workflow_dispatch` event, a condition on the event type cannot tell a scheduled run from a hand-started one. Turning runs off at their source creates no workflow run to skip and leaves manual dispatch working throughout a maintenance window. |
 | Secrets vs. variables | Credentials as secrets, configuration as variables | Variables are visible in the workflow UI, which is what a reader of a failed run wants for the bucket and bounding box; keys stay masked. |
 
 ## Open Questions & Future Decisions
@@ -196,4 +202,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
   `sensor_hourly`.
 - `docs/intent/observation-store/observation-store-design.md` — single writer per partition;
   `load_partitions`, `rebuild`, `DATABASE_URL`, `AQDT_ARCHIVE_URI`.
-- GitHub Actions: `schedule` events, `concurrency`, repository secrets and variables.
+- `docs/intent/infrastructure/infrastructure-design.md` — the EventBridge schedules that render
+  these cadences, the Lambda that dispatches these workflows, and the switch that enables them.
+- GitHub Actions: `workflow_dispatch` events and inputs, `concurrency`, repository secrets and
+  variables.

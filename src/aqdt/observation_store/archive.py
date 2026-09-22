@@ -32,7 +32,7 @@ from aqdt.observation_store.frames import (
     validate_partition,
 )
 from aqdt.observation_store.products import OBSERVATIONS, SITES, Product, render_partition_value
-from aqdt.observation_store.schemas import Observation, Site, Source
+from aqdt.observation_store.schemas import ARCHIVE_BUCKET, Observation, Site, Source
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class ConcurrentWriteError(RuntimeError):
 MAX_WRITE_ATTEMPTS = 5
 
 
-# @spec OBS-ENV-001, OBS-ENV-002
+# @spec OBS-ENV-001, OBS-ENV-002, OBS-ENV-010
 def resolve_archive_uri(archive_uri: str | None) -> str:
     """The archive to use: the explicit URI, else ``AQDT_ARCHIVE_URI``, else an error naming it."""
     if archive_uri:
@@ -58,7 +58,25 @@ def resolve_archive_uri(archive_uri: str | None) -> str:
     from_env = os.environ.get(ARCHIVE_URI_VAR)
     if not from_env:
         raise MissingConfiguration(f"{ARCHIVE_URI_VAR} is not set and no archive_uri was given")
+    _check_bucket(from_env)
     return from_env
+
+
+def _check_bucket(uri: str) -> None:
+    """An ``s3://`` archive from the environment must be the bucket the stack manages.
+
+    A stale variable pointing at an unmanaged bucket is not a failure but a quiet divergence,
+    found only when someone asks why the archive stopped growing. An explicitly passed URI is not
+    checked — that is how a deliberate experiment elsewhere is run — and neither is a local path.
+    """
+    if not uri.startswith("s3://"):
+        return
+    bucket = uri[len("s3://") :].split("/", 1)[0]
+    if bucket != ARCHIVE_BUCKET:
+        raise MissingConfiguration(
+            f"{ARCHIVE_URI_VAR} names bucket {bucket!r}, but this project's archive lives in "
+            f"{ARCHIVE_BUCKET!r}. Pass --archive-uri explicitly to use another bucket on purpose."
+        )
 
 
 # @spec OBS-ARCHIVE-002

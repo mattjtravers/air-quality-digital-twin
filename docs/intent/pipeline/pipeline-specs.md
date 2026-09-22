@@ -6,8 +6,9 @@ prefix: PIPE
 # Pipeline — EARS Specs
 
 Facets: `CLI` (the `aqdt` command and its sub-commands), `WIN` (routine-window resolution),
-`OUT` (output and exit status), `PG` (PostGIS loading from the command line), `SCHED` (the
-GitHub Actions workflows), `CFG` (configuration on runners and tests).
+`OUT` (output and exit status), `PG` (PostGIS loading from the command line), `SCHED` (the GitHub
+Actions workflows a run executes in; what dispatches them, and on what cadence, is the
+infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tests).
 
 ## Command-Line Interface
 
@@ -46,17 +47,16 @@ GitHub Actions workflows), `CFG` (configuration on runners and tests).
 - [x] **PIPE-PG-002**: When `DATABASE_URL` is unset, or `--no-postgis` is given, the pipeline shall pass `conn=None` so that the run touches the archive only.
 - [x] **PIPE-PG-003**: If a run's archive writes succeed but its PostGIS load raises, then the pipeline shall exit non-zero (the archive is intact; `aqdt db rebuild` repairs the serving layer).
 
-## Schedules
+## Workflows
 
-- [x] **PIPE-SCHED-001**: The repository shall contain the workflows `.github/workflows/ingest-purpleair.yaml`, `ingest-airnow.yaml`, `calibrate-fit.yaml`, and `calibrate-apply.yaml`, each with a `schedule` trigger and a `workflow_dispatch` trigger.
-- [x] **PIPE-SCHED-002**: The workflows' cron expressions shall be `*/15 * * * *` (PurpleAir), `20 * * * *` (AirNow), `30 0 * * *` (fit), and `40 * * * *` (apply).
+- [x] **PIPE-SCHED-001**: The repository shall contain the workflows `.github/workflows/ingest-purpleair.yaml`, `ingest-airnow.yaml`, `calibrate-fit.yaml`, and `calibrate-apply.yaml`, each declaring `workflow_dispatch` as its only trigger, so that every run — scheduled or by hand — reaches the workflow by the same path.
 - [x] **PIPE-SCHED-003**: Each workflow shall run exactly one `aqdt` command — `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply` respectively — via `uv run` after `uv sync --no-dev`.
 - [x] **PIPE-SCHED-004**: Each workflow shall declare a `concurrency` group with `cancel-in-progress: false`: `ingest-purpleair`, `ingest-airnow`, and `calibrate` for both calibration workflows, so that two runs doing the same work over overlapping windows are queued rather than run at once (correctness under concurrent writers is the observation store's, OBS-ARCHIVE-026).
 - [x] **PIPE-SCHED-005**: Each workflow's job shall declare `timeout-minutes` of 10 (PurpleAir), 20 (AirNow), 30 (fit), and 20 (apply).
 - [x] **PIPE-SCHED-006**: When a workflow is started by `workflow_dispatch` with non-empty `start`/`end` (ingest airnow, calibrate apply) or `as_of` (calibrate fit) inputs, the workflow shall pass them as the corresponding command options; empty inputs shall pass nothing, so the routine window applies.
 - [x] **PIPE-SCHED-007**: No workflow shall set `DATABASE_URL`, so that scheduled runs write the archive only.
 - [x] **PIPE-SCHED-008**: No workflow shall commit, push, or upload artifacts to the repository; the archive is the only output.
-- [x] **PIPE-SCHED-009**: Each workflow's job shall run only when the event is `workflow_dispatch` or the repository variable `AQDT_SCHEDULES_ENABLED` equals `true`, so that scheduled occurrences are skipped until the schedules are activated and manual runs are always possible.
+- [x] **PIPE-SCHED-009**: No workflow shall gate its job on an activation condition; scheduled runs are turned off at their source by disabling the EventBridge schedules that dispatch them (`INFRA-OPS-006`), so a workflow that receives a dispatch always runs it.
 
 ## Configuration
 

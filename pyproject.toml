@@ -33,6 +33,7 @@ packages = ["src/aqdt"]
 
 [dependency-groups]
 dev = [
+    "aws-sam-cli>=1.148.0",
     "boto3>=1.43.75",
     "moto[s3,server]>=5.2.3",
     "pytest==9.1.1",

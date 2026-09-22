@@ -11,7 +11,6 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 EXPECTED = {
     "ingest-purpleair.yaml": {
-        "cron": "*/15 * * * *",
         "command": "aqdt ingest purpleair",
         "group": "ingest-purpleair",
         "timeout": 10,
@@ -19,7 +18,6 @@ EXPECTED = {
         "secrets": {"PURPLEAIR_API_KEY"},
     },
     "ingest-airnow.yaml": {
-        "cron": "20 * * * *",
         "command": "aqdt ingest airnow",
         "group": "ingest-airnow",
         "timeout": 20,
@@ -27,7 +25,6 @@ EXPECTED = {
         "secrets": {"AIRNOW_API_KEY"},
     },
     "calibrate-fit.yaml": {
-        "cron": "30 0 * * *",
         "command": "aqdt calibrate fit",
         "group": "calibrate",
         "timeout": 30,
@@ -35,7 +32,6 @@ EXPECTED = {
         "secrets": set(),
     },
     "calibrate-apply.yaml": {
-        "cron": "40 * * * *",
         "command": "aqdt calibrate apply",
         "group": "calibrate",
         "timeout": 20,
@@ -80,16 +76,14 @@ def workflow(request):
 
 
 # @spec PIPE-SCHED-001
-def test_four_workflows_with_schedule_and_dispatch(workflow):
+def test_workflow_dispatch_is_the_only_trigger(workflow):
     name, wf, _ = workflow
     on = triggers(wf)
-    assert "schedule" in on and "workflow_dispatch" in on, name
-
-
-# @spec PIPE-SCHED-002
-def test_cron_expressions(workflow):
-    name, wf, expected = workflow
-    assert [entry["cron"] for entry in triggers(wf)["schedule"]] == [expected["cron"]], name
+    assert "workflow_dispatch" in on, name
+    assert set(on) == {"workflow_dispatch"}, (
+        f"{name}: every run arrives by dispatch; a schedule trigger would be a second, "
+        f"unreliable path (found {sorted(on)})"
+    )
 
 
 # @spec PIPE-SCHED-003
@@ -149,11 +143,13 @@ def test_no_workflow_writes_to_the_repository(workflow):
 
 
 # @spec PIPE-SCHED-009
-def test_scheduled_runs_are_gated_on_the_activation_variable(workflow):
+def test_no_workflow_gates_its_job(workflow):
     name, wf, _ = workflow
-    condition = the_job(wf)["if"]
-    assert "github.event_name == 'workflow_dispatch'" in condition, name
-    assert "vars.AQDT_SCHEDULES_ENABLED == 'true'" in condition, name
+    assert "if" not in the_job(wf), (
+        f"{name}: scheduled runs are turned off by disabling the EventBridge schedules, so a "
+        f"workflow that receives a dispatch always runs it"
+    )
+    assert "AQDT_SCHEDULES_ENABLED" not in (WORKFLOWS / name).read_text(), name
 
 
 # @spec PIPE-CFG-001

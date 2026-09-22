@@ -36,6 +36,43 @@ def test_archive_uri_defaults_to_the_environment_variable(tmp_path, monkeypatch)
         read_observations()
 
 
+# @spec OBS-ENV-009
+def test_the_archive_bucket_is_a_constant_of_the_store():
+    from aqdt.observation_store import ARCHIVE_BUCKET
+
+    assert ARCHIVE_BUCKET == "air-quality-digital-twin-585949919812-us-east-1-archive"
+
+
+# @spec OBS-ENV-010
+def test_an_s3_uri_naming_another_bucket_is_refused(monkeypatch):
+    from aqdt.observation_store import ARCHIVE_BUCKET
+    from aqdt.observation_store.archive import resolve_archive_uri
+
+    monkeypatch.setenv("AQDT_ARCHIVE_URI", "s3://some-other-bucket/dc-metro")
+    with pytest.raises(Exception) as raised:
+        resolve_archive_uri(None)
+    message = str(raised.value)
+    assert "some-other-bucket" in message and ARCHIVE_BUCKET in message
+
+    monkeypatch.setenv("AQDT_ARCHIVE_URI", f"s3://{ARCHIVE_BUCKET}/dc-metro")
+    assert resolve_archive_uri(None) == f"s3://{ARCHIVE_BUCKET}/dc-metro"
+
+
+# @spec OBS-ENV-010
+def test_the_bucket_check_leaves_local_and_explicit_archives_alone(tmp_path, monkeypatch):
+    """Local and offline archives, and a deliberately chosen bucket, stay available."""
+    from aqdt.observation_store.archive import resolve_archive_uri
+
+    monkeypatch.setenv("AQDT_ARCHIVE_URI", str(tmp_path / "local"))
+    assert resolve_archive_uri(None) == str(tmp_path / "local")
+
+    monkeypatch.setenv("AQDT_ARCHIVE_URI", f"file://{tmp_path}/local")
+    assert resolve_archive_uri(None) == f"file://{tmp_path}/local"
+
+    monkeypatch.setenv("AQDT_ARCHIVE_URI", "s3://some-other-bucket/dc-metro")
+    assert resolve_archive_uri("s3://an-experiment/elsewhere") == "s3://an-experiment/elsewhere"
+
+
 # @spec OBS-ENV-003
 def test_devcontainer_runs_a_postgis_sidecar_via_docker_compose():
     devcontainer = (ROOT / ".devcontainer" / "devcontainer.json").read_text()

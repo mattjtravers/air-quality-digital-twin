@@ -1,0 +1,191 @@
+# @spec INFRA-SCHED-001, INFRA-SCHED-002, INFRA-SCHED-003, INFRA-SCHED-004, INFRA-SCHED-005,
+# @spec INFRA-SCHED-006, INFRA-SCHED-007, INFRA-DISP-001, INFRA-DISP-010, INFRA-DISP-011,
+# @spec INFRA-DISP-012, INFRA-DISP-013, INFRA-DISP-014, INFRA-OPS-007
+#
+# The disposable stack: schedules, the function they invoke, and the alarm that says when it
+# stopped working. Deleting it stops scheduled runs and touches nothing that holds data.
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Air quality digital twin — scheduled dispatch of the pipeline's GitHub workflows.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: mattjtravers
+  GitHubRepo:
+    Type: String
+    Default: air-quality-digital-twin
+  GitHubRef:
+    Type: String
+    Default: main
+    Description: >-
+      The ref every scheduled run executes. Running another branch stays a manual act, so that a
+      scheduled run always uses the reviewed definition on the default branch.
+  GitHubTokenSecretName:
+    Type: String
+    Default: aqdt/github-dispatch-token
+    Description: >-
+      Secrets Manager secret holding a fine-grained PAT with Actions:write on this repository.
+      Created by hand before this stack is deployed; its value never appears here.
+
+Resources:
+  DispatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-dispatch"
+      Description: Turns one schedule firing into one GitHub workflow_dispatch call.
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      CodeUri: app/
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          GITHUB_OWNER: !Ref GitHubOwner
+          GITHUB_REPO: !Ref GitHubRepo
+          GITHUB_REF: !Ref GitHubRef
+          GITHUB_TOKEN_SECRET_NAME: !Ref GitHubTokenSecretName
+      Policies:
+        # A Secrets Manager ARN ends in a six-character suffix AWS assigns at creation, so it
+        # cannot be composed from the name. The wildcard is the narrowest grant a name allows,
+        # and it survives the secret being deleted and recreated under the same name.
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub >-
+                arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-??????
+
+  DispatchFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-dispatch"
+      RetentionInDays: 30
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: EventBridge Scheduler invokes its target under this role, not the function's.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: scheduler.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke-dispatch-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DispatchFunction.Arn
+
+  # Every schedule is created DISABLED. Deploying this stack is not a decision to start
+  # dispatching; bin/schedules.sh is what turns them on, and off again for a maintenance window.
+  IngestPurpleAirSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-ingest-purpleair
+      Description: PurpleAir snapshot ingest, four times an hour.
+      State: DISABLED
+      ScheduleExpression: cron(0/15 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "ingest-purpleair.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  IngestAirNowSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-ingest-airnow
+      Description: AirNow hourly ingest, after the feed publishes the hour just ended.
+      State: DISABLED
+      ScheduleExpression: cron(20 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "ingest-airnow.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  CalibrateFitSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-calibrate-fit
+      Description: Daily refit, once the day's last AirNow hour is archived.
+      State: DISABLED
+      ScheduleExpression: cron(30 0 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "calibrate-fit.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  CalibrateApplySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-calibrate-apply
+      Description: Hourly apply, following both ingesters.
+      State: DISABLED
+      ScheduleExpression: cron(40 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "calibrate-apply.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  # A failed dispatch produces no workflow run, so GitHub shows nothing at all. Without this the
+  # archive would just quietly stop growing.
+  DispatchErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-dispatch-errors"
+      AlarmDescription: The dispatcher could not start a run — no workflow run will exist to show it.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DispatchFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  DispatchFunctionArn:
+    Value: !GetAtt DispatchFunction.Arn
+  ScheduleNames:
+    Description: The schedules bin/schedules.sh enables and disables.
+    Value: !Join
+      - ","
+      - - !Ref IngestPurpleAirSchedule
+        - !Ref IngestAirNowSchedule
+        - !Ref CalibrateFitSchedule
+        - !Ref CalibrateApplySchedule

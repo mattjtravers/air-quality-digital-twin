@@ -1,0 +1,42 @@
+# SAM configuration — one environment per stack, selected with --config-env.
+# @spec INFRA-OPS-002, INFRA-OPS-003, INFRA-OPS-004
+#
+# Region is pinned rather than inherited from AWS_DEFAULT_REGION, so a deploy cannot land in a
+# different region from the archive because of a shell variable. Nothing here is a credential:
+# the GitHub token is named by its secret, never expressed.
+
+version = 0.1
+
+[foundation.build.parameters]
+cached = true
+
+[foundation.deploy.parameters]
+stack_name = "aqdt-foundation"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+fail_on_empty_changeset = false
+template_file = "infra/foundation/template.yaml"
+
+[foundation.validate.parameters]
+region = "us-east-1"
+lint = true
+template_file = "infra/foundation/template.yaml"
+
+[dispatch.build.parameters]
+cached = true
+template_file = "infra/dispatch/template.yaml"
+
+[dispatch.deploy.parameters]
+stack_name = "aqdt-dispatch"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+fail_on_empty_changeset = false
+
+[dispatch.validate.parameters]
+region = "us-east-1"
+lint = true
+template_file = "infra/dispatch/template.yaml"

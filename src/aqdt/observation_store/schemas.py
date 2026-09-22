@@ -197,3 +197,10 @@ class BoundingBox(BaseModel):
 DC_METRO = BoundingBox(nwlng=-77.5, nwlat=39.1, selng=-76.7, selat=38.7)
 """The project's extent: the Washington, D.C. metro. Ingester settings default to it; ``AQDT_BBOX``
 overrides it for an experiment over another extent."""
+
+
+# @spec OBS-ENV-009
+ARCHIVE_BUCKET = "air-quality-digital-twin-585949919812-us-east-1-archive"
+"""The bucket the archive lives in, declared by the foundation stack and asserted equal to this
+constant by a test. A code default for the same reason as ``DC_METRO``: which bucket holds the
+system of record is a fact about the project, not a deployment detail."""

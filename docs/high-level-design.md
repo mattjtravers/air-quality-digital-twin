@@ -267,7 +267,8 @@ EARS prefix.
 | `purpleair-ingest` | `PA` | PurpleAir client, parsing, A/B agreement and humidity QC |
 | `airnow-ingest` | `AN` | AirNow client, parsing, flatline and site-identifier QC |
 | `calibration` | `CAL` | hourly aggregation, distance-aware sensor-to-monitor matching, per-sensor fits |
-| `pipeline` | `PIPE` | the command-line entry point, routine windows, and the AWS EventBridge Scheduler dispatch that triggers scheduled runs |
+| `pipeline` | `PIPE` | the command-line entry point, routine windows, and the cadence each scheduled run follows |
+| `infrastructure` | `INFRA` | the SAM stacks, the dispatch Lambda, and every AWS resource the twin depends on |
 
 Later increments add leaves (`fusion`, `transport`, `evaluation`) beside these.
 

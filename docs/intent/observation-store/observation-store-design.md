@@ -399,6 +399,16 @@ is `DATABASE_URL` from the environment (docker-compose default in the Codespace)
   is unset the operation fails immediately with an error naming the variable, rather than falling
   back to a local path that would silently split the archive.
 
+- The bucket the archive lives in is a constant of the store, `ARCHIVE_BUCKET`, for the same
+  reason the bounding box is: it is a fact about the project rather than a deployment detail, and
+  it belongs in versioned code where a reader can find it. An `AQDT_ARCHIVE_URI` that names an
+  `s3://` bucket other than that one fails before any read or write, naming both buckets — a
+  stale variable pointing at an unmanaged bucket is otherwise not a failure but a quiet
+  divergence, discovered only when someone asks why the archive stopped growing. A URI passed
+  explicitly as an argument is not checked, which is how a deliberate experiment against another
+  bucket is run, and a non-`s3://` URI is not checked, which is what keeps local and offline
+  archives working.
+
 - Devcontainer: `docker-compose.yml` with the app container and a `postgis/postgis` service;
   `devcontainer.json` references it via `dockerComposeFile`. `postCreateCommand` runs
   `uv sync --all-groups`, `apply_schema`, and `rebuild`.
