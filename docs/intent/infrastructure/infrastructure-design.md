@@ -190,8 +190,9 @@ A 404 collapsing four distinct faults is the reason the message matters: without
 token and a renamed workflow file look identical in CloudWatch.
 
 Configuration reaches the function as template parameters rendered into environment variables:
-`GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_REF` (default `main`), and `GITHUB_TOKEN_SECRET_NAME`. The
-values are supplied by `parameter_overrides` in `samconfig.toml`. Timeout 10 s, memory 128 MB.
+`GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_REF` (default `main`), and `GITHUB_TOKEN_SECRET_NAME`. Each
+parameter carries the value this project uses as its `Default`, so a deploy needs no overrides and
+the template reads as the complete description of what it creates. Timeout 10 s, memory 128 MB.
 
 Its role grants `secretsmanager:GetSecretValue` and nothing else beyond log writes. The resource
 is `arn:aws:secretsmanager:{region}:{account}:secret:{name}-??????` — a Secrets Manager ARN ends
@@ -239,34 +240,65 @@ so that the quiet periods between the sparser schedules do not themselves alarm.
 dispatch is worth knowing about, because the retry policy is deliberately short and the schedules
 that fire once a day have no second chance that day.
 
-A dispatcher that stops being invoked at all — a schedule disabled, deleted, or never enabled —
-produces no errors and so no alarm. That gap is an open question below.
+The alarm carries no `AlarmActions`. It changes state in the CloudWatch console and notifies
+nobody, because the monitoring surface for this system is the Lambda and CloudWatch consoles read
+by hand. There is one operator, who is also the developer, and a notification path would cost a
+topic, a subscription confirmed out of band, and an address in a template to report something that
+operator is already in the console to see.
+
+Two failures sit outside what the alarm can reach, and both are accepted. A dispatcher that stops
+being invoked at all — a schedule disabled, deleted, or never enabled — produces no errors, so no
+alarm state changes; the archive going stale is the only signal. A token approaching expiry is
+likewise unwatched, and the alarm reports its expiry only once it has already stopped a dispatch.
+In both cases the staleness is the falsification signal the HLD names, and a system checked by its
+operator rather than paged at reaches it soon enough.
 
 ## Deployment
 
 `aws-sam-cli` is a dev dependency in `pyproject.toml`, so `uv sync --all-groups` installs it and
 every invocation is `uv run sam ...`; no devcontainer feature and no separate install step. The
-`aws-cli` devcontainer feature, already present, supplies the credentials and the one-off calls
-that create the secret.
+`aws-cli` devcontainer feature, already present, carries the credentials and makes the one-off
+calls that create the secret.
+
+**The deploying principal.** The credentials the Codespace holds by default belong to the runner
+IAM user, whose policy reaches the archive prefix and nothing else; it cannot create a stack.
+Deploys run instead as a separate IAM user, `aqdt-deploy`, kept as a named AWS CLI profile in the
+Codespace. Selecting it takes more than naming the profile: the Codespace receives the runner
+user's credentials as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, and environment variables
+outrank a profile in the AWS credential chain, so a deploy command is prefixed
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY AWS_PROFILE=aqdt-deploy`. Naming the profile
+alone silently runs as the runner user. Separating the two matters
+because the runner user's access keys are also this repository's Actions secrets, so widening that
+user enough to deploy would widen every workflow run with it. `aqdt-deploy` is created by hand and
+appears in no template: a template cannot create the identity that deploys it.
 
 `samconfig.toml` holds one config environment per stack, selected with `--config-env`:
 
 ```
-uv run sam build   --config-env foundation && uv run sam deploy --config-env foundation
-uv run sam build   --config-env dispatch   && uv run sam deploy --config-env dispatch
+uv run sam deploy --config-env foundation
+uv run sam deploy --config-env dispatch
 ```
+
+Neither deploy runs `sam build` first. The foundation stack declares no code at all, and the
+dispatch function has no dependency to install, so a build step would copy `handler.py` and
+nothing else — while requiring a `python3.13` interpreter on `PATH` to match the function's
+runtime, or a container image pulled to stand in for one. The Codespace carries neither, because
+the project's own interpreter tracks the version the pipeline package needs rather than the
+version Lambda runs. `sam deploy` packages the `CodeUri` directory directly, which for a
+single-file function is the same artifact the build would have produced.
 
 Both environments pin `region` to the archive bucket's region rather than inheriting
 `AWS_DEFAULT_REGION`, so a deploy cannot land in a different region from the archive depending on
 a shell variable. `capabilities = "CAPABILITY_IAM"` on both, since each stack creates roles.
 `.aws-sam/` is git-ignored.
 
-`samconfig.toml` is committed and holds stack names, the region, and `parameter_overrides` such as
-the repository owner and the secret's name. This does not contradict the project's rule that
-configuration is environment variables and never files: that rule governs what a *run* reads at
-runtime, where a file in the repository would fork the archive or leak a key. A template parameter
-is a deploy-time description of a resource, it belongs in version control beside the template that
-consumes it, and none of these values is a credential — the one secret is named, never expressed.
+`samconfig.toml` is committed and holds stack names, the region, and capabilities; the parameter
+values themselves are `Default`s on the templates' own parameters. This does not contradict the
+project's rule that configuration is environment variables and never files: that rule governs what
+a *run* reads at runtime, where a file in the repository would fork the archive or leak a key. A
+template parameter is a deploy-time description of a resource, it belongs in version control
+beside the template that consumes it, and none of these values is a credential — the one secret is
+named, never expressed.
 
 ### Deploy order
 
@@ -312,9 +344,9 @@ the property the two-stack split exists to give. Deleting the foundation stack l
 now-unmanaged bucket and OIDC provider behind — recovering management of them would be a resource
 import, so the foundation stack is not something to delete casually.
 
-Both stacks are deployed by a developer from the Codespace using the credentials already
-configured there. There is no deployment from CI, and nothing detects a template that was merged
-but never deployed.
+Both stacks are deployed by a developer from the Codespace under the `aqdt-deploy` profile, with
+the runner user's environment credentials unset for the command. There is no deployment from CI,
+and nothing detects a template that was merged but never deployed.
 
 ## Package Layout
 
@@ -389,27 +421,22 @@ request, and that each distinguished failure status raises with its own message.
 | Window bounds on a scheduled dispatch | None; the body carries `ref` only | A dispatched run resolves its own routine window, exactly as a hand-run command does, so the trigger holds no window logic and there is one code path for both. |
 | Duplicate dispatch | Neither detected nor suppressed | Dispatch is at-least-once; tracking dispatch identity across invocations would cost more state than a duplicate costs runner minutes, and the duplicate is a no-op because runs are idempotent. |
 | Archive prefix in the runner policy | A template parameter, defaulting to `dc-metro` | The same prefix is part of `AQDT_ARCHIVE_URI`; writing it into the policy as a literal would let the two drift without anything noticing. |
+| Monitoring surface | The Lambda and CloudWatch consoles, read by hand; the `Errors` alarm carries no action and nothing watches for missing invocations or a token nearing expiry | One operator, who is also the developer, already opens the console to look at a run. A notification path costs a topic, a subscription confirmed out of band, and an address in a template to tell that person what the console shows them. The archive going stale remains the falsification signal for everything the alarm cannot reach. |
+| Deploying principal | A separate hand-made IAM user, `aqdt-deploy`, as a named AWS CLI profile | The runner user's policy reaches the archive prefix only, so it cannot deploy; and its access keys are this repository's Actions secrets, so widening it to deploy would widen every workflow run. A template cannot create the identity that deploys it, so this one identity stays outside the templates. |
 | Guarding `AQDT_ARCHIVE_URI` against the managed bucket | A bucket-name constant in the observation store, asserted equal to the template offline, and enforced at run start | A stack managing one bucket while runs write to another is a quiet divergence rather than a failure. Checking template against code catches drift in CI; checking the variable at run start catches a stale value on the first run. |
 
 ## Open Questions & Future Decisions
 
-1. Where the `Errors` alarm sends its notification. An SNS topic with an email subscription is the
-   obvious target, but the subscription must be confirmed by hand, so the topic is the stack's and
-   the subscription is not.
-2. Whether to alarm on the *absence* of invocations as well as on errors. A schedule that is
-   disabled or deleted produces no errors and no runs; only a missing-data alarm catches it.
-3. How a token approaching expiry is noticed before it stops every schedule. Nothing currently
-   watches the expiry date, and an expired token fails silently in the sense that matters — the
-   archive simply stops growing.
-4. Whether anything should detect a template merged to `main` but never deployed. Deployment is a
+1. Whether anything should detect a template merged to `main` but never deployed. Deployment is a
    developer action from a disposable Codespace, so deployed state can diverge from the repository
    with nothing reporting it.
-5. Whether the four schedules should carry an `AWS::Scheduler::ScheduleGroup`, which would give
+2. Whether the four schedules should carry an `AWS::Scheduler::ScheduleGroup`, which would give
    them a shared namespace, though not a single on/off switch — a group's schedules are still
    enabled and disabled one at a time, which is what `bin/schedules.sh` exists to hide.
-6. Whether the foundation stack should also declare the PostGIS-side resources if the serving
+3. Whether the foundation stack should also declare the PostGIS-side resources if the serving
    layer ever moves out of the Codespace. Nothing depends on this today.
-7. Retiring the hand-made IAM user once the workflows adopt the OIDC role.
+4. Retiring the hand-made runner IAM user once the workflows adopt the OIDC role. `aqdt-deploy`
+   stays either way — it is the identity that deploys, not one a run uses.
 
 ## References
 

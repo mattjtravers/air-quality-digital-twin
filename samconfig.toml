@@ -35,6 +35,7 @@ capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
 fail_on_empty_changeset = false
+template_file = "infra/dispatch/template.yaml"
 
 [dispatch.validate.parameters]
 region = "us-east-1"
