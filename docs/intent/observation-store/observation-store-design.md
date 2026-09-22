@@ -133,6 +133,9 @@ windows downstream components aggregate over — is half-open: `[start, end)` in
 excludes `end`. Consecutive windows therefore partition time without sharing a boundary instant.
 An ingester whose source API takes an inclusive end renders it as `end − (one source interval)`.
 
+Every datetime in the project is tz-aware UTC. A naive datetime fails validation at construction;
+a tz-aware non-UTC datetime is converted to UTC there.
+
 Not in the schema, by design: any ingestion timestamp, run identifier, or host detail. Their
 absence is what makes archive writes deterministic.
 
@@ -428,47 +431,37 @@ tests/
 
 `aqdt` is the import package for the whole project (`src/` layout, declared in `pyproject.toml`).
 
-## Decisions & Alternatives
+## Decisions
 
-| Decision | Chosen | Alternatives Considered | Rationale |
-|----------|--------|------------------------|-----------|
-| Where site coordinates live | On both `Site` (latest) and every `Observation` (as observed) | Site only; observation only | Sensors get relocated; the observation must record where it was measured, while spatial queries against "the site" want one current point. Denormalization is cheap at this volume. |
-| Provenance of raw payload | Full source record stored as `raw` JSON on every observation | Selected extra fields only; separate raw dump keyed by observation | One column satisfies "traceable to raw payload" with no join and no second store; row volume is small (hundreds of sites, hourly-ish). |
-| Ingestion timestamp / run id | Not stored on rows | `ingested_at` column; `run_id` column | Any per-run value makes re-runs non-identical and breaks the deterministic-write guarantee. Run bookkeeping belongs to the orchestrator when one exists. |
-| Concurrent writers to one partition | The store guarantees one writer per partition: compare-and-swap (`If-Match` on the ETag) on S3, an advisory file lock locally, re-read and re-merge on refusal | Caller serializes runs (a trigger-level concurrency group, an orchestrator); a lock object in S3 with a TTL; a lock service (DynamoDB) | The invariant is the store's, and a guarantee that depends on which trigger started the run cannot cover a hand-run command or a future orchestrator. A lock object needs stale-lock handling for crashed writers; a lock service is a second system. CAS has nothing to leak and costs one extra merge only when two writers actually collide, which at a handful of writes a day per partition is rare. |
-| Merge policy on re-write | Incoming record wins on `(site_id, observed_at)` | First-seen wins; append with version column | Upstream revisions (AirNow preliminary data) should replace earlier values; versioning every row adds a dimension nothing downstream needs yet. |
-| Partition key | `{source}/date={UTC date}` | Hourly partitions; single file per source; partition by site | Daily files stay small enough to rewrite atomically and large enough to avoid file sprawl; source-first lets a run touch only its own tree. |
-| Archive location | S3 bucket, addressed by `fsspec` URI | Workspace directory; git-committed data branch; MinIO sidecar | A Codespace and its volumes are deleted after inactivity, so nothing inside it can be the system of record. S3 is the durable, sector-standard home for cloud-native GeoParquet and is read natively by GeoPandas/pyarrow. Git churns binary Parquet on every run; MinIO lives inside the disposable Codespace and only adds an S3 API to local storage. |
-| Archive addressing | `fsspec` URI resolved once to a filesystem object | Hard-coded S3 client; separate local and S3 code paths | One code path for `s3://` and local paths keeps tests fast and offline while production writes to S3; pyarrow and GeoPandas accept fsspec filesystems directly. |
-| S3 in tests | Local temp directory for most tests; `moto` for the S3-specific path | Real bucket in CI; MinIO service container | No credentials in CI and no network; `moto` runs in-process and exercises the boto3 calls the store actually makes. |
-| Test fixtures | Small committed source-payload fixtures under `tests/fixtures/` | Live API calls in tests; recorded HTTP cassettes | Determinism without credentials; fixtures double as documentation of each source's payload shape. |
-| Record vs. frame schema | Pydantic record models are canonical; Pandera frame models restate them plus frame-level invariants; a conformance test keeps them aligned | Pydantic only; Pandera only; generate one entirely from the other | Frame invariants (uniqueness, sortedness, geometry) have no record-level source, so full generation is impossible in that direction; generating Pydantic from Pandera loses nested-payload validation and JSON Schema. A test is the cheapest thing that catches drift. |
-| Read return type | Validated GeoDataFrame | `list[Observation]`; both via a flag | Every consumer (PostGIS load, calibration, fusion) works on frames; record round-trips on bulk reads are the slow, wrong shape. |
-| Duplicate keys within one write batch | Fail validation | Last-in-batch wins | A within-batch duplicate is an ingester defect; silently resolving it hides the bug. Cross-run merging is a different, intended case. |
-| Latest observation per site | Computed at query time as `max(observed_at)` over the site's observations | `last_observed_at` column on `Site`, maintained by the ingesters | Sites are merged incoming-wins, so a stored timestamp regresses whenever an older window is backfilled; keeping it right would need a per-column merge rule in the generic writer or a read-before-write in every ingester. At this volume the aggregate is free. |
-| Trusted-observation definition | `qc_flags == []` | Boolean `is_valid` column; severity levels per flag | One rule, no second field to keep consistent; downstream stages that want to tolerate specific flags filter on the list. |
-| Boundary validation failures | Counted and reported by the ingester; not stored as observations | Store as observations with a flag; store in a `rejected/` partition | A record that cannot be parsed into the schema is not an observation. Flag-never-drop governs observations that exist. Whether to persist rejects for audit is open (see below). |
-| PostGIS access | `psycopg` with explicit SQL | GeoPandas `to_postgis` (SQLAlchemy + GeoAlchemy2); an ORM | Upsert semantics need `on conflict`; explicit SQL keeps the dependency set to one driver and the schema in plain files a DBA can read. |
-| Schema migrations | Ordered SQL files, idempotent `create if not exists` | Alembic | Two tables and no ORM; a migration framework is more tooling than schema. Revisit when a destructive change is needed. |
-| GeoParquet writer | GeoPandas `to_parquet` | PyArrow directly with hand-written GeoParquet metadata | GeoPandas writes standards-compliant GeoParquet metadata and is already the read tool of choice. |
-| Write mechanics for derived products | Store exposes `write_partitioned` / `read_partitioned` over a `Product` definition; products own their schemas and tables | Each downstream component implements its own writer; store owns every product's schema | One implementation of determinism, atomicity, and validation is easier to get right and keep right than one per component; owning downstream schemas here would make the store a bottleneck for every later layer's design. |
-| Partition keys | Derived by functions on the frame, rendered to strings | Partition columns stored in the frame | The observation key `date` is a function of `observed_at`, and frame models forbid extra columns; deriving keeps the archive schema equal to the record schema. |
-| Partition directory style | Hive `key=value` for every key, including `source` | Bare `{source}/` directory | Uniform Hive layout lets pyarrow and DuckDB discover partitions without hints. |
-| How PostGIS learns about products | A registry module listing every product in load order | Each component calls `upsert_frame` itself; the store imports every component | A single ordered list gives `rebuild` and `load_partitions` one source of truth and keeps the store from importing its own consumers; a component that loads itself would be a second write path into PostGIS. |
-| When PostGIS is refreshed | Each run loads the partitions it wrote, when given a connection | Separate load step; runs always load | Runs return their touched partitions for exactly this; an optional connection keeps tests and offline work archive-only while letting a routine run leave PostGIS current. |
-| Import package name | `aqdt`, `src/` layout | `air_quality_digital_twin`; flat layout | Short name for a package imported everywhere; `src/` layout keeps tests running against the installed package, not the working directory. |
+| Decision | Chosen | Rationale |
+|----------|--------|-----------|
+| Where site coordinates live | On both `Site` (latest) and every `Observation` (as observed) | Sensors get relocated, so the observation must record where it was measured, while spatial queries against "the site" want one current point. Denormalization is cheap at this volume. |
+| Provenance of raw payload | Full source record stored as `raw` JSON on every observation | One column satisfies "traceable to raw payload" with no join and no second store; row volume is small (hundreds of sites, hourly-ish). |
+| Ingestion timestamp / run id | Not stored on rows | Any per-run value would make re-runs non-identical and break the deterministic-write guarantee. Run bookkeeping belongs to the orchestrator when one exists. |
+| Concurrent writers to one partition | The store guarantees one writer per partition: compare-and-swap (`If-Match` on the ETag) on S3, an advisory file lock locally, re-read and re-merge on refusal | The invariant is the store's: a guarantee that depended on which trigger started a run could not cover a hand-run command or a future orchestrator. Compare-and-swap leaves nothing behind when a writer crashes and costs one extra merge only when two writers actually collide, which at a handful of writes a day per partition is rare. |
+| Merge policy on re-write | Incoming record wins on `(site_id, observed_at)` | Upstream revisions (AirNow preliminary data) should replace earlier values, and nothing downstream needs a per-row version history. |
+| Partition key | `{source}/date={UTC date}` | Daily files stay small enough to rewrite atomically and large enough to avoid file sprawl; source-first lets a run touch only its own tree. |
+| Archive location | S3 bucket, addressed by `fsspec` URI | A Codespace and its volumes are deleted after inactivity, so nothing inside it can be the system of record. S3 is the durable, sector-standard home for cloud-native GeoParquet and is read natively by GeoPandas/pyarrow. |
+| Archive addressing | `fsspec` URI resolved once to a filesystem object | One code path for `s3://` and local paths keeps tests fast and offline while production writes to S3; pyarrow and GeoPandas accept fsspec filesystems directly. |
+| S3 in tests | Local temp directory for most tests; `moto` for the S3-specific path | No credentials in CI and no network; `moto` runs in-process and exercises the boto3 calls the store actually makes. |
+| Test fixtures | Small committed source-payload fixtures under `tests/fixtures/` | Determinism without credentials; fixtures double as documentation of each source's payload shape. |
+| Record vs. frame schema | Pydantic record models are canonical; Pandera frame models restate them plus frame-level invariants; a conformance test keeps them aligned | Frame invariants (uniqueness, sortedness, geometry) have no record-level source, so the frame models cannot simply be generated from the records. A test is the cheapest thing that catches drift between the two. |
+| Read return type | Validated GeoDataFrame | Every consumer (PostGIS load, calibration, fusion) works on frames; record round-trips on bulk reads are the slow shape. |
+| Duplicate keys within one write batch | Fail validation | A within-batch duplicate is an ingester defect, and silently resolving it would hide the bug. Cross-run merging is a different, intended case. |
+| Latest observation per site | Computed at query time as `max(observed_at)` over the site's observations | Sites are merged incoming-wins, so a stored timestamp would regress whenever an older window is backfilled; keeping it right would need a per-column merge rule in the generic writer or a read-before-write in every ingester. At this volume the aggregate is free. |
+| Trusted-observation definition | `qc_flags == []` | One rule, no second field to keep consistent; downstream stages that want to tolerate specific flags filter on the list. |
+| Boundary validation failures | Counted and reported by the ingester; not stored as observations | A record that cannot be parsed into the schema is not an observation; flag-never-drop governs observations that exist. Whether to persist rejects for audit is open (see below). |
+| PostGIS access | `psycopg` with explicit SQL | Upsert semantics need `on conflict`; explicit SQL keeps the dependency set to one driver and the schema in plain files a DBA can read. |
+| Schema migrations | Ordered SQL files, idempotent `create if not exists` | Two tables and no ORM; revisit when a destructive change is needed. |
+| GeoParquet writer | GeoPandas `to_parquet` | GeoPandas writes standards-compliant GeoParquet metadata and is already the read tool of choice. |
+| Write mechanics for derived products | Store exposes `write_partitioned` / `read_partitioned` over a `Product` definition; products own their schemas and tables | One implementation of determinism, atomicity, and validation is easier to get right and keep right than one per component, and leaving schema ownership with each component keeps the store from being a bottleneck for every later layer's design. |
+| Partition keys | Derived by functions on the frame, rendered to strings | The observation key `date` is a function of `observed_at`, and frame models forbid extra columns; deriving keeps the archive schema equal to the record schema. |
+| Partition directory style | Hive `key=value` for every key, including `source` | Uniform Hive layout lets pyarrow and DuckDB discover partitions without hints. |
+| How PostGIS learns about products | A registry module listing every product in load order | A single ordered list gives `rebuild` and `load_partitions` one source of truth, keeps the store from importing its own consumers, and leaves exactly one write path into PostGIS. |
+| When PostGIS is refreshed | Each run loads the partitions it wrote, when given a connection | Runs return their touched partitions for exactly this; an optional connection keeps tests and offline work archive-only while letting a routine run leave PostGIS current. |
+| Import package name | `aqdt`, `src/` layout | Short name for a package imported everywhere; `src/` layout keeps tests running against the installed package, not the working directory. |
 
 ## Open Questions & Future Decisions
-
-### Resolved
-
-1. ✅ Datetimes are tz-aware UTC everywhere; naive datetimes fail validation at construction, and
-   tz-aware non-UTC datetimes are converted to UTC on construction.
-2. ✅ Concurrent writers to one partition are unsupported; serialization is the caller's job.
-3. ✅ An observation without coordinates cannot exist (schema requires them); such source records
-   are boundary validation failures.
-
-### Deferred
 
 1. Whether to persist boundary-rejected source records to a `rejected/` partition (raw JSON plus
    reason) for audit, or only count and log them. Leaning: persist, since it costs one extra

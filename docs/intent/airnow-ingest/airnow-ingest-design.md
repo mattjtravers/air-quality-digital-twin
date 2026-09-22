@@ -195,37 +195,25 @@ tests/airnow/
 tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed AQS codes
 ```
 
-## Decisions & Alternatives
+## Decisions
 
-| Decision | Chosen | Alternatives Considered | Rationale |
-|----------|--------|------------------------|-----------|
-| `dataType` | `B` (concentration + AQI) | `A` (AQI only); `C` (concentration only) | Fusion and calibration need µg/m³; AQI is a categorical transform of concentration and cannot be inverted exactly. `B` keeps AQI in `raw` at no cost. |
-| Canonical site identifier | 12-digit international AQS code | 9-digit full AQS code; `SiteName`; AirNow's own site id | The international code is the most specific published identifier and is what AQS itself uses; site names change and are not unique. Normalizing *to* the longer form loses nothing. |
-| Lost-leading-zero repair | Pad 8→9 and 11→12 digits | Reject as unresolvable | A numeric-typed identifier losing its leading zero is a known, mechanical failure mode of upstream pipelines; the repair is unambiguous for AQS codes, whose fixed-width structure makes the missing position certain. |
-| Conflicting codes | Unresolved, flagged | Prefer `IntlAQSCode`; prefer `FullAQSCode` | Two identifiers that disagree after normalization mean the row's identity is genuinely uncertain; guessing would silently join observations to the wrong site. |
-| Flatline lookback | Over-fetch `flatline_hours − 1` hours before the window | Read prior hours from the archive | Over-fetching removes a read dependency on the archive, and re-fetching recent hours also picks up AirNow's revisions to preliminary data, which the archive wants anyway. |
-| Flatline threshold | 3 consecutive identical hours, configurable | 6; 12; zero-only rule | Matches the observed fault; hourly urban PM2.5 at 0.1 µg/m³ resolution rarely repeats three times by chance, and a false positive only moves a reading out of the trusted set, it does not remove it. |
-| Duplicate site-hour in one run | Keep first, count the rest as boundary rejections | Fail the run; keep last | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows; failing the run for a plausible upstream shape is too brittle, and dropping silently hides it. The count makes it visible. |
-| Mobile monitors | Excluded at the query (`monitorType=0`) | Ingest and flag | A mobile monitor has no fixed site identity; nothing downstream could join it. |
-| Corrected value | Null | Copy `pm25_raw` | Reference monitors are the reference; a corrected column equal to the raw one implies a correction happened. |
-| Routine window | 48 hours | 24 hours; since the last run | AirNow re-issues the preceding 48 hours on every hourly update; a 48-hour window collects every revision at the cost of one extra request per run. |
-| Unresolved-site key | `IntlAQSCode`, else `FullAQSCode`, else `SiteName` as received | Coordinates; a hash of the row | Two distinct unresolvable sites sharing a `SiteName` — reachable only when both codes are absent — would merge into one flagged site and count as duplicates. Accepted: the metro's monitors always carry both codes, and an unresolved site is already excluded from trusted data. |
-| Request chunking | 24-hour requests | One request per window; per-hour requests | Keeps each request well inside AirNow's response and rate limits while making a week-long backfill seven calls, not 168. |
-| HTTP client | `httpx` (sync) | `requests` | Same reasoning as the PurpleAir ingester; one client library across ingesters. |
+| Decision | Chosen | Rationale |
+|----------|--------|-----------|
+| `dataType` | `B` (concentration + AQI) | Fusion and calibration need µg/m³, and AQI is a categorical transform of concentration that cannot be inverted exactly. `B` keeps AQI in `raw` at no cost. |
+| Canonical site identifier | 12-digit international AQS code | The international code is the most specific published identifier and is what AQS itself uses; site names change and are not unique. |
+| Lost-leading-zero repair | Pad 8→9 and 11→12 digits | A numeric-typed identifier losing its leading zero is a known, mechanical failure mode of upstream pipelines, and the repair is unambiguous for AQS codes, whose fixed-width structure makes the missing position certain. |
+| Conflicting codes | Unresolved, flagged | Two identifiers that disagree after normalization mean the row's identity is genuinely uncertain; guessing would silently join observations to the wrong site. |
+| Flatline lookback | Over-fetch `flatline_hours − 1` hours before the window | Over-fetching removes a read dependency on the archive, and re-fetching recent hours also picks up AirNow's revisions to preliminary data, which the archive wants anyway. |
+| Flatline threshold | 3 consecutive identical hours, configurable | Matches the observed fault; hourly urban PM2.5 at 0.1 µg/m³ resolution rarely repeats three times by chance, and a false positive only moves a reading out of the trusted set, it does not remove it. |
+| Duplicate site-hour in one run | Keep first, count the rest as boundary rejections | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows. Keeping the first tolerates that shape; counting the rest keeps it visible. |
+| Mobile monitors | Excluded at the query (`monitorType=0`) | A mobile monitor has no fixed site identity; nothing downstream could join it. |
+| Corrected value | Null | Reference monitors are the reference; a corrected column equal to the raw one would imply a correction happened. |
+| Routine window | 48 hours | AirNow re-issues the preceding 48 hours on every hourly update; a 48-hour window collects every revision at the cost of one extra request per run. |
+| Unresolved-site key | `IntlAQSCode`, else `FullAQSCode`, else `SiteName` as received | Two distinct unresolvable sites sharing a `SiteName` — reachable only when both codes are absent — would merge into one flagged site and count as duplicates. Accepted: the metro's monitors always carry both codes, and an unresolved site is already excluded from trusted data. |
+| Request chunking | 24-hour requests | Keeps each request well inside AirNow's response and rate limits while making a week-long backfill seven calls, not 168. |
+| HTTP client | `httpx` (sync) | Sync matches the batch model, and one client library is shared across ingesters. |
 
 ## Open Questions & Future Decisions
-
-### Resolved
-
-1. ✅ `Value` and `RawConcentration` sentinels (`-999`) become nulls at the boundary and surface
-   as `missing_value`, not `out_of_range`.
-2. ✅ A hour missing from a site's series breaks a flatline run rather than bridging it.
-3. ✅ No future-timestamp check: the query's `endDate` bounds what AirNow returns, and there is
-   no response-level timestamp to compare against without depending on run time.
-4. ✅ `UTC` labels the start of the averaging hour (AirNow Hourly Data fact sheet), so
-   `observed_at = UTC` with no shift, and the canonical timestamp is always the hour start.
-
-### Deferred
 
 1. Tune `flatline_hours` after observing the false-positive rate on real data.
 2. Whether `RawConcentration` (AirNow's pre-processing value) should be promoted to a schema

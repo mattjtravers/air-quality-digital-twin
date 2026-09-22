@@ -171,33 +171,24 @@ src/aqdt/calibration/
 tests/calibration/
 ```
 
-## Decisions & Alternatives
+## Decisions
 
-| Decision | Chosen | Alternatives Considered | Rationale |
-|----------|--------|------------------------|-----------|
-| Reference matching | Nearest monitor within `max_distance_m`; pooled fit beyond it | Single network-wide reference; inverse-distance blend of all monitors in range; distance as a covariate in one regional model | A single reference ignores the metro's size — the weakness this design exists to avoid. A blended reference is not a measurement anyone made and muddies the diagnostics. Nearest-within-radius keeps each fit interpretable as a sensor-vs-monitor comparison and states plainly when no comparison is possible. |
-| Fit form | Per-sensor OLS slope and intercept on the Barkjohn-corrected value | Intercept only; slope only; refit humidity from scratch; Deming regression | Bias and gain both vary by sensor. Humidity nonlinearity is already handled nationally by Barkjohn; refitting it per sensor with a few hundred pairs overfits. Deming is defensible (both sides have error) but its variance-ratio input is unknown here; OLS with the reference as target is the convention in the sensor-calibration literature. |
-| Acceptance gate | `n_pairs ≥ 72` and `slope > 0` | Also gate on `r2`; no gate | A negative slope means the pairing is meaningless. `r2` depends on how much the air varied in the window, not only on the sensor, so gating on it rejects good sensors in calm weeks. |
-| Fallback | Pooled OLS over accepted sensors' pairs | Pass through uncorrected; nearest-sensor's fit; no value | The pooled fit is the network's average bias and gain — a better estimate than none. Borrowing a neighbour's fit assumes neighbours share faults, which the data does not support. |
-| Reference eligibility | Nearest monitor with at least one trusted observation in the window | Nearest monitor by geometry alone | A monitor with no data in the window yields zero pairs and pushes the sensor to the pooled fit even when a slightly farther monitor has a full month; the match should be between things that can be compared. |
-| Sensors that receive a fit row | Every `low_cost_sensor` site in the sites table, per `as_of` | Only sensors with hourly rows in the window | "What is this sensor's fit?" always has one answer, and a silent sensor is visibly `pooled` or `uncalibrated` rather than absent. |
-| Pooled-fit gate | Same `slope > 0` as per-sensor fits | No gate | A negative network-wide slope is as meaningless as a negative per-sensor one; serving it would calibrate every fallback sensor backwards. |
-| Fit-age cap when applying | None; `fit_as_of` recorded | Refuse fits older than N days | A stale fit is a better estimate than none, and the row says how stale; a cap would silently drop sensors during any gap in fit runs. |
-| Hourly aggregation minimum | None; `n_snapshots` recorded | Require ≥ N snapshots per hour | Snapshot density reflects ingestion cadence, not sensor quality; consumers can filter on the count. |
-| Distance computation | GeoPandas in EPSG:26918 | PostGIS `ST_DWithin` on geography | Keeps calibration a pure function of the archive, runnable and testable without a database; PostGIS remains the serving layer for the results. |
-| Refit cadence | Daily | Hourly; weekly | Sensor drift is slow; daily refits track it while keeping the fit history readable. |
-| Window length | 30 days | 7; 14; 60 | Long enough for the pair count and for a range of concentrations; short enough to follow drift. Tunable. |
+| Decision | Chosen | Rationale |
+|----------|--------|-----------|
+| Reference matching | Nearest monitor within `max_distance_m`; pooled fit beyond it | Matching by distance keeps each fit interpretable as a comparison between one sensor and one monitor, and states plainly when no comparison is possible — which is what the metro's size demands. |
+| Fit form | Per-sensor OLS slope and intercept on the Barkjohn-corrected value | Bias and gain both vary by sensor. Humidity nonlinearity is already handled nationally by Barkjohn, and OLS with the reference as target is the convention in the sensor-calibration literature. |
+| Acceptance gate | `n_pairs ≥ 72` and `slope > 0` | A negative slope means the pairing is meaningless. `r2` is deliberately not gated on: it depends on how much the air varied in the window rather than on the sensor, so gating on it would reject good sensors in calm weeks. |
+| Fallback | Pooled OLS over accepted sensors' pairs | The pooled fit is the network's average bias and gain — a better estimate than none for a sensor with no usable reference. |
+| Reference eligibility | Nearest monitor with at least one trusted observation in the window | A monitor with no data in the window yields zero pairs and would push the sensor to the pooled fit even when a slightly farther monitor has a full month; the match should be between things that can be compared. |
+| Sensors that receive a fit row | Every `low_cost_sensor` site in the sites table, per `as_of` | "What is this sensor's fit?" always has one answer, and a silent sensor is visibly `pooled` or `uncalibrated` rather than absent. |
+| Pooled-fit gate | Same `slope > 0` as per-sensor fits | A negative network-wide slope is as meaningless as a negative per-sensor one; serving it would calibrate every fallback sensor backwards. |
+| Fit-age cap when applying | None; `fit_as_of` recorded | A stale fit is a better estimate than none, and the row says how stale it is; a cap would silently drop sensors during any gap in fit runs. |
+| Hourly aggregation minimum | None; `n_snapshots` recorded | Snapshot density reflects ingestion cadence, not sensor quality; consumers can filter on the count. |
+| Distance computation | GeoPandas in EPSG:26918 | Keeps calibration a pure function of the archive, runnable and testable without a database; PostGIS remains the serving layer for the results. |
+| Refit cadence | Daily | Sensor drift is slow; daily refits track it while keeping the fit history readable. |
+| Window length | 30 days | Long enough for the pair count and for a range of concentrations; short enough to follow drift. Tunable. |
 
 ## Open Questions & Future Decisions
-
-### Resolved
-
-1. ✅ Flagged observations are excluded from fitting and from hourly aggregation; nothing is
-   calibrated that was not trusted.
-2. ✅ AirNow's `observed_at` is the start of the averaging hour, so sensor hour `H` and monitor
-   hour `H` align without a shift.
-
-### Deferred
 
 1. Whether `max_distance_m = 10 000` leaves too many D.C. sensors on the pooled fit. Decide from
    the matched-fraction after the first fit run.
@@ -213,6 +204,5 @@ tests/calibration/
 - `docs/high-level-design.md` — Calibration is distance-aware from the outset.
 - `docs/intent/observation-store/observation-store-design.md` — inputs, write mechanics.
 - `docs/intent/purpleair-ingest/purpleair-ingest-design.md` — `pm25_corrected` semantics.
-- O'Regan et al. (2026), calibration section — the single-reference approach this design departs
-  from.
+- O'Regan et al. (2026), calibration section — prior art for sensor-to-monitor calibration.
 - Barkjohn et al. (2021) — the correction applied upstream of this fit.

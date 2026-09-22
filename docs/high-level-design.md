@@ -42,11 +42,13 @@ them. Layers 4–6 are designed at this level only so that the earlier layers do
 
 Every pipeline step is a pure function of *(inputs, time window)* that can be re-run for the same
 window and produce the same result. Each step is invoked through one command-line entry point,
-on demand or on a schedule; the pipeline is not a resident daemon. Schedules live in GitHub
-Actions cron workflows, which need no host of their own — the development environment (GitHub
+on demand or on a schedule; the pipeline is not a resident daemon. Every run still executes on a
+GitHub Actions runner, which needs no host of its own — the development environment (GitHub
 Codespaces) idles out and is periodically rebuilt, so nothing that must keep running can live
-there. This matches the way most scientific data pipelines are operated and makes each step a
-ready-made asset for a workflow orchestrator once backfills and lineage are needed.
+there. Scheduled runs are triggered by AWS EventBridge Scheduler, which dispatches each run
+through GitHub's `workflow_dispatch` API at the cadence its routine window expects (see Execution
+model below). This matches the way most scientific data pipelines are operated and makes each
+step a ready-made asset for a workflow orchestrator once backfills and lineage are needed.
 
 ### Domain-standard methods, interoperable formats
 
@@ -95,13 +97,12 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
   a prior PM2.5 surface. A simple emissions proxy may be scoped in a later phase; nothing in the
   current design assumes one.
 - **No background / boundary PM2.5.** Nothing represents PM2.5 entering the domain from outside it
-  (no equivalent of CAMS). This is a known limitation of the fused surface, recorded here so it is
-  not mistaken for an oversight.
+  (no equivalent of CAMS). This is a known limitation of the fused surface.
 - **No resident real-time service.** "Real-time" means the latest available observations as of the
   most recent scheduled or on-demand run, not a continuously polling daemon. PurpleAir's ~2-minute
   native cadence is not captured continuously.
-- **No workflow orchestrator yet.** Runs are scheduled by cron and wrapped by nothing; Dagster
-  is the intended target once backfills and lineage across a running pipeline are needed.
+- **No workflow orchestrator yet.** Scheduled runs are dispatched directly and wrapped by nothing;
+  Dagster is the intended target once backfills and lineage across a running pipeline are needed.
 - **No gridded data in PostGIS.** HRRR and any derived surfaces are stored as CF-convention
   NetCDF/Zarr and handled with xarray; PostGIS holds point observations and site metadata only.
 - **No user-facing application.** Outputs are data assets consumable by QGIS, notebooks, and
@@ -127,7 +128,13 @@ Ordered: when two conflict, the higher one wins.
 
 ```mermaid
 flowchart LR
-    subgraph schedule [GitHub Actions cron]
+    subgraph trigger [AWS EventBridge Scheduler]
+        EBS[one schedule per<br/>routine cadence]
+        LAM[dispatch Lambda<br/>calls workflow_dispatch]
+        EBS -->|invokes| LAM
+    end
+
+    subgraph schedule [GitHub Actions]
         SCH[pipeline CLI<br/>ingest / calibrate runs]
     end
 
@@ -158,6 +165,7 @@ flowchart LR
         ZR[(Zarr / NetCDF<br/>gridded fields)]
     end
 
+    LAM -.->|workflow_dispatch API| SCH
     SCH -.->|triggers| PAI
     SCH -.->|triggers| ANI
     SCH -.->|triggers| CAL
@@ -220,12 +228,23 @@ everything; operational stages read a window, so history depth is never a runtim
 
 ### Environment
 
-Two environments share one codebase and one archive.
+Two environments run the pipeline's own code and share one codebase and one archive; a third,
+minimal environment exists only to trigger it.
 
-**Scheduled runs** execute on GitHub Actions runners: a cron workflow per run checks out the
-repository, installs it, and invokes the pipeline entry point against the S3 archive. Runners
-have no PostGIS, so scheduled runs write the archive only. API keys, AWS credentials, and the
-archive URI are repository secrets.
+**Scheduled runs** execute on GitHub Actions runners: a workflow per run checks out the
+repository, installs it, and invokes the pipeline entry point against the S3 archive, whether
+invoked by a scheduled dispatch or a manual `workflow_dispatch` call. Runners have no PostGIS, so
+scheduled runs write the archive only. API keys, AWS credentials, and the archive URI are
+repository secrets.
+
+**Scheduling** is driven by AWS EventBridge Scheduler, one schedule per routine cadence, each
+invoking a small Lambda that calls GitHub's `workflow_dispatch` API for the corresponding
+workflow. The Lambda holds a GitHub PAT scoped to `actions:write` on this repository, stored in
+AWS Secrets Manager and fetched at invoke time; it carries no pipeline logic and never touches the
+archive or PostGIS. The workflows carry no `schedule:` cron trigger at all — a trigger that drops
+most of its occurrences is not a working backup, and leaving it in the YAML would read as one to a
+future maintainer. `workflow_dispatch` is the only trigger each workflow declares, invoked by the
+Lambda on a schedule or by a human on demand.
 
 **Development and serving** happen in a GitHub Codespace defined by the devcontainer. A Codespace
 and everything inside it — workspace files, Docker volumes — is deleted after a period of
@@ -248,60 +267,62 @@ EARS prefix.
 | `purpleair-ingest` | `PA` | PurpleAir client, parsing, A/B agreement and humidity QC |
 | `airnow-ingest` | `AN` | AirNow client, parsing, flatline and site-identifier QC |
 | `calibration` | `CAL` | hourly aggregation, distance-aware sensor-to-monitor matching, per-sensor fits |
-| `pipeline` | `PIPE` | the command-line entry point, routine windows, and the GitHub Actions schedules |
+| `pipeline` | `PIPE` | the command-line entry point, routine windows, and the AWS EventBridge Scheduler dispatch that triggers scheduled runs |
 
 Later increments add leaves (`fusion`, `transport`, `evaluation`) beside these.
 
 ## Key Design Decisions
 
-### Execution model: idempotent time-windowed batch, scheduled by GitHub Actions cron
+### Execution model: idempotent time-windowed batch, triggered by AWS EventBridge, executed by GitHub Actions
 
 Each step is a function of *(inputs, time window)*, invoked through one command-line entry point,
-and safe to repeat. Schedules are GitHub Actions cron workflows that run that entry point against
-the S3 archive: they need no host, cost nothing on a public repository, and put every run's log
-beside the code.
+and safe to repeat. Execution is on GitHub Actions runners: they need no host, cost nothing on a
+public repository, and put every run's log beside the code.
 
-Cron on Actions is best-effort — a run can start minutes late under load — and its minimum
-interval is far coarser than PurpleAir's two-minute native cadence. That is acceptable because no
-consumer needs the native cadence: calibration aggregates PurpleAir to hours and imposes no
-minimum snapshot count, so a few snapshots per hour suffice, and every run's window overlaps its
-predecessor so a late or skipped run is recovered by the next. Concurrent runs are safe from any
-trigger because the archive itself guarantees one writer per partition (the store's writes are
-compare-and-swap: a partition changed under a writer is re-read and re-merged, never
-overwritten); concurrency groups serialize each workflow with itself only so that two runs over
-the same window do not both spend runner minutes.
+The trigger is separate from the executor, because GitHub Actions' own `schedule:` cron trigger is
+not dependable enough to keep the archive current — it drops most occurrences outright rather than
+running them late, leaving multi-hour gaps at a nominal 15-minute cadence. AWS EventBridge
+Scheduler, a managed cron that fires to the minute, holds one schedule per routine cadence
+(PurpleAir every 15 minutes, AirNow and calibrate-apply hourly, calibrate-fit daily) and invokes a
+small Lambda that calls GitHub's `workflow_dispatch` REST API for the matching workflow.
+`workflow_dispatch` is the only trigger the workflows declare, so there is exactly one scheduled
+path and it is the reliable one.
 
-Alternatives: a resident poller in the Codespace was rejected because the Codespace idles out. An
-AWS-side schedule (EventBridge driving a container that runs the same entry point) would give
-true cadence control and reliable timing, at the cost of a second deployment target with its own
-image, IAM, and infrastructure code; it is the fallback if snapshot density ever proves
-insufficient, and the entry point is designed so that switching triggers changes nothing else. A
-workflow orchestrator (Dagster) is still the intended wrapper — its trigger is now the need for
-backfills and lineage across a running pipeline, not the size of the asset graph — and it would
-sit on the same entry points.
+Timing precision beyond this is unnecessary: no consumer needs PurpleAir's two-minute native
+cadence, since calibration aggregates PurpleAir to hours and imposes no minimum snapshot count, so
+a few snapshots per hour suffice, and every run's window overlaps its predecessor so a late or
+missed run is recovered by the next. Concurrent runs are safe from any trigger because the archive
+itself guarantees one writer per partition (the store's writes are compare-and-swap: a partition
+changed under a writer is re-read and re-merged, never overwritten); concurrency groups serialize
+each workflow with itself only so that two runs over the same window do not both spend runner
+minutes.
+
+A workflow orchestrator (Dagster) is the intended eventual wrapper, sitting on the same entry
+points, once backfills and lineage across a running pipeline are needed.
 
 ### Persistence: GeoParquet archive as system of record, PostGIS as serving layer
 
 Point observations are written to a partitioned GeoParquet archive in S3 (durable, reproducible,
 readable by GeoPandas/DuckDB/QGIS directly from object storage, and safe for concurrent writers
 through S3's conditional writes) and loaded into PostGIS (spatial SQL for distance-aware
-matching, native QGIS connectivity). Two stores cost a load step and a sync
-to keep tested; the alternative of PostGIS alone was rejected because the Codespace database does
-not outlive the Codespace and the archive is what makes the twin reproducible. Keeping the archive
-in the workspace or in git was rejected for the same reason plus binary churn on every run. GeoParquet alone was rejected because
-sensor-to-monitor matching and site joins are spatial queries best expressed in SQL. DuckDB with
-its spatial extension was rejected: its advantage (no service to run) does not apply once
-docker-compose sidecars are available, and PostGIS is the interoperability target for GIS tooling.
+matching, native QGIS connectivity).
+
+Both stores earn their place. The archive lives in durable object storage because the Codespace
+database does not outlive the Codespace, and the archive is what makes the twin reproducible; it
+stays out of the workspace and out of git because binary Parquet would churn on every run. PostGIS
+is the serving layer because sensor-to-monitor matching and site joins are spatial queries best
+expressed in SQL, and because it is the interoperability target for GIS tooling. The cost of two
+stores is a load step and a schema sync to keep tested.
 
 ### QC: source-specific rules, shared flag vocabulary, flag-never-drop
 
 Each ingester applies the checks its source needs, using published criteria where they exist
 (Barkjohn et al. 2021 for PurpleAir channel agreement and humidity correction). Results are
-recorded as flag columns on the observation; raw values are never modified or removed. The flag
-vocabulary is shared across sources so downstream stages filter uniformly. A generic pluggable QC
-framework was rejected as premature for two sources; a deferred second-pass QC stage was rejected
-because it leaves unflagged faulty data live in the store between passes; filtering invalid rows at
-ingestion was rejected because it destroys provenance.
+recorded as flag columns on the observation; raw values are never modified or removed, because
+filtering at ingestion destroys provenance. QC runs inline with ingestion rather than as a later
+pass, so faulty data is never live in the store unflagged. The flag vocabulary is shared across
+sources so downstream stages filter uniformly; with two sources, each ingester holds its own rules
+directly rather than registering them with a framework.
 
 ### Fusion is observational; no dispersion baseline
 
@@ -312,12 +333,11 @@ alone. Scoping in a simple emissions proxy is a possible later decision, not a d
 
 ### Calibration is distance-aware from the outset
 
-O'Regan et al. calibrated every sensor against a single reference monitor regardless of distance
-(up to ~12 km). The D.C. metro is larger and has several monitors, so each PurpleAir sensor is
-matched to its nearest reference monitor within a radius, with a pooled network-wide fit for
-sensors that have none. The decision is recorded at this level because it constrains the
-observation schema (full-precision coordinates, stable site identity). Distances are computed
-from the archive in GeoPandas rather than in PostGIS so that calibration stays a pure function of
+The D.C. metro is large and has several reference monitors, so which monitor a sensor is compared
+against matters: each PurpleAir sensor is matched to its nearest reference monitor within a
+radius, with a pooled network-wide fit for sensors that have none. This is recorded at HLD level
+because it constrains the observation schema (full-precision coordinates, stable site identity).
+Distances are computed from the archive in GeoPandas so that calibration stays a pure function of
 the archive; PostGIS serves the results.
 
 ### Schemas: Pydantic for records, Pandera for frames
@@ -338,17 +358,15 @@ built for them.
 The two definitions of the same schema must agree. Where one can be derived from the other, derive
 it; where it cannot (frame-level checks have no record-level source), a conformance test asserts
 that the Pydantic and Pandera definitions name the same columns with the same nullability and
-compatible types. Using Pydantic alone was rejected because per-record validation is the wrong
-shape for bulk reads and cannot state collection invariants; Pandera alone was rejected because it
-is awkward for nested API payloads and cannot export JSON Schema. Plain dataclasses were rejected
-for lacking validation and schema export.
+compatible types. Each library covers what the other cannot: per-record validation is the wrong
+shape for bulk reads and cannot state collection invariants, while frame validation is awkward for
+nested API payloads and cannot export JSON Schema.
 
 ### Gridded fields live outside PostGIS
 
-HRRR inputs and any fused/forecast surfaces are CF-convention NetCDF or Zarr handled with xarray.
-Storing rasters in a relational database was rejected: the scientific tooling for gridded
-atmospheric data is the xarray ecosystem, and PostGIS raster support is a poor fit for
-time-stepped model output.
+HRRR inputs and any fused/forecast surfaces are CF-convention NetCDF or Zarr handled with xarray,
+which is the scientific tooling for gridded atmospheric data. PostGIS holds point observations
+only; its raster support is a poor fit for time-stepped model output.
 
 ## Success Metrics
 

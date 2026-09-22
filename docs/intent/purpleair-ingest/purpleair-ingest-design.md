@@ -173,32 +173,22 @@ tests/purpleair/
 tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B fault
 ```
 
-## Decisions & Alternatives
+## Decisions
 
-| Decision | Chosen | Alternatives Considered | Rationale |
-|----------|--------|------------------------|-----------|
-| Channel-agreement criteria | EPA/Barkjohn: `\|A−B\| > 5` µg/m³ **and** relative difference `> 0.61`, on each snapshot | Absolute-only threshold; relative-only; PurpleAir's own `confidence` / `channel_flags` fields | The published criteria are the sector standard and are what EPA's own PurpleAir products use; a lone absolute threshold over-flags at high concentrations and a lone relative one over-flags near zero. PurpleAir's flags are opaque and undocumented in their derivation. |
-| Correction equation | Barkjohn 2021 linear form | EPA's 2022 extended (piecewise, for high smoke concentrations); no correction | The linear form is the published, widely-cited baseline and is exact for the concentration range D.C. sees on ordinary days. The extended form matters during wildfire-smoke episodes and is a deferred upgrade. Storing no corrected value would push a fixed, well-known step onto every downstream consumer. |
-| Correction input | Mean of channels A and B | PurpleAir's sensor-level `pm2.5_cf_1`; channel A only | Matches the published fit, whose input was the A/B mean; the sensor-level field's fallback behaviour when one channel is degraded is PurpleAir's, not EPA's. |
-| `pm25_raw` | PurpleAir's sensor-level `pm2.5_cf_1`, as reported | A/B mean computed here; channel A | Raw means what the source said; the channels are stored beside it, so any recomputation is possible downstream. |
-| Correction when `pm2.5_cf_1` is null but both channels and humidity are present | Computed | Withhold (treat `missing_value` like the other flags) | The correction's inputs are the channels and humidity, not the sensor-level field, so its preconditions are met; the row is untrusted regardless because it carries `missing_value`. |
-| Corrected value when flagged | Null | Compute regardless; compute from the surviving channel | A corrected number implies the input met the correction's preconditions; publishing one for a faulty reading invites misuse. The raw channels remain for anyone who wants to do otherwise. |
-| Indoor sensors | Excluded at the query (`location_type=0`) | Ingest and flag | Indoor air is a different measurand, not a low-quality reading of ambient air; flag-never-drop governs readings of the thing being measured. |
-| Snapshot vs. history endpoint | `/sensors` snapshot per run | `/sensors/:id/history` per sensor | One request per run versus one per sensor per run; snapshot polling matches the batch execution model and history depth is not a runtime prerequisite. |
-| Retry policy | 3 attempts, exponential backoff, on 429/5xx/network errors | No retry; unbounded retry | Runs are idempotent so retrying is safe; bounded so a dead API fails the run loudly instead of hanging. |
-| HTTP client | `httpx` (sync) | `requests`; `aiohttp` | Sync matches the batch model; `httpx` is the current standard with a clean mockable transport for tests. |
+| Decision | Chosen | Rationale |
+|----------|--------|-----------|
+| Channel-agreement criteria | EPA/Barkjohn: `\|A−B\| > 5` µg/m³ **and** relative difference `> 0.61`, on each snapshot | The published criteria are the sector standard and are what EPA's own PurpleAir products use. Requiring both conditions avoids over-flagging at high concentrations, which an absolute threshold alone does, and near zero, which a relative one alone does. |
+| Correction equation | Barkjohn 2021 linear form | The published, widely-cited baseline, exact for the concentration range D.C. sees on ordinary days. Storing a corrected value here keeps a fixed, well-known step off every downstream consumer. |
+| Correction input | Mean of channels A and B | Matches the published fit, whose input was the A/B mean; the sensor-level field's fallback behaviour when one channel is degraded is PurpleAir's, not EPA's. |
+| `pm25_raw` | PurpleAir's sensor-level `pm2.5_cf_1`, as reported | Raw means what the source said; the channels are stored beside it, so any recomputation is possible downstream. |
+| Correction when `pm2.5_cf_1` is null but both channels and humidity are present | Computed | The correction's inputs are the channels and humidity, not the sensor-level field, so its preconditions are met; the row is untrusted regardless because it carries `missing_value`. |
+| Corrected value when flagged | Null | A corrected number implies the input met the correction's preconditions; publishing one for a faulty reading invites misuse. The raw channels remain for anyone who wants to do otherwise. |
+| Indoor sensors | Excluded at the query (`location_type=0`) | Indoor air is a different measurand, not a low-quality reading of ambient air; flag-never-drop governs readings of the thing being measured. |
+| Snapshot vs. history endpoint | `/sensors` snapshot per run | One request per run rather than one per sensor per run; snapshot polling matches the batch execution model, and history depth is not a runtime prerequisite. |
+| Retry policy | 3 attempts, exponential backoff, on 429/5xx/network errors | Runs are idempotent so retrying is safe; bounded so a dead API fails the run loudly instead of hanging. |
+| HTTP client | `httpx` (sync) | Sync matches the batch model; `httpx` is the current standard with a clean mockable transport for tests. |
 
 ## Open Questions & Future Decisions
-
-### Resolved
-
-1. ✅ `max_age=86400`: a sensor silent for over a day is omitted by the API rather than fetched
-   and re-written unchanged; staleness within a day is a query-time question for consumers.
-2. ✅ Humidity from the sensor's onboard sensor is used as-is, as in the published fit.
-3. ✅ An empty payload is a successful, visible no-op; a duplicated sensor within one payload fails
-   the run at the store's duplicate check.
-
-### Deferred
 
 1. Adopt the EPA 2022 extended correction (piecewise, valid above ~250 µg/m³) if smoke episodes
    become a use case; the coefficients must be taken from the published source at that time.
@@ -208,12 +198,11 @@ tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B 
 3. Persisting boundary rejections (shared with the observation store's open question).
 4. Verify the relative-difference threshold (0.61, "2 SD" in the source) against Barkjohn et al.
    2021 §2 before the constant is committed to code.
-5. Sensor clock-skew detection (a `last_seen` ahead of the response's `data_time_stamp`). A flag
-   computed against the response timestamp changes from poll to poll for the same
-   `(site_id, last_seen)` and is removed by the store's incoming-wins merge, and storing the
-   response timestamp on the row would make identical sensor rows non-identical across polls.
-   No deterministic formulation has been found; a clock-ahead sensor lands in the partition its
-   own `last_seen` names and is otherwise unaffected.
+5. Sensor clock-skew detection (a `last_seen` ahead of the response's `data_time_stamp`). Any such
+   flag must be deterministic for a given `(site_id, last_seen)`, which rules out comparing
+   against the response timestamp: that value changes from poll to poll, and storing it on the row
+   would make identical sensor rows differ across polls. Today a clock-ahead sensor lands in the
+   partition its own `last_seen` names and is otherwise unaffected.
 
 ## References
 

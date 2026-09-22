@@ -65,7 +65,10 @@ archived while it was idle.
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
 `logging` at `--log-level`, including the resolved window before the run starts. A run that
 raises exits non-zero with the exception; nothing is retried at this level (the HTTP clients
-retry requests; the schedule's next occurrence retries the run).
+retry requests; the schedule's next occurrence retries the run). A run whose archive write
+succeeds but whose PostGIS load fails also exits non-zero: the archive is intact and the next
+`aqdt db rebuild` repairs the serving layer, but the run did not do what was asked and must
+say so.
 
 **Settings.** Each command constructs only the settings it needs: `aqdt calibrate fit` does not
 require `PURPLEAIR_API_KEY`. Missing configuration fails before any request is made.
@@ -113,7 +116,8 @@ concurrency groups exist to keep two runs of the same workflow from both spendin
 on overlapping windows and interleaving their logs: each ingester is serialized with itself, and
 fit and apply share the `calibrate` group because both aggregate the same sensor hours.
 `cancel-in-progress` is false everywhere — a run in progress is never interrupted; a queued run
-may be superseded by a newer queued run, which is harmless because windows overlap.
+may be superseded by a newer queued run, which GitHub reports as cancelled rather than failed and
+which is harmless because the newer run's window covers it.
 
 **Configuration on runners.** Credentials are repository secrets: `PURPLEAIR_API_KEY`,
 `AIRNOW_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Non-secret configuration is
@@ -149,56 +153,38 @@ src/aqdt/
 tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workflow files
 ```
 
-## Decisions & Alternatives
+## Decisions
 
-| Decision | Chosen | Alternatives Considered | Rationale |
-|----------|--------|------------------------|-----------|
-| CLI library | `argparse` (standard library) | `typer`; `click` | Six sub-commands with a handful of options; a dependency buys nothing here and the standard library has no version to track. |
-| Entry point | Console script `aqdt` plus `python -m aqdt` | `python -m` only; per-component scripts | One name for every trigger to invoke; `-m` costs one file and helps when the script is not on `PATH`. |
-| Where the clock enters | Only in resolving a routine window in the CLI | Components default their own windows; workflows compute windows in shell | Keeps every component a pure function of explicit bounds and puts the one clock read where it is logged and testable. Computing in shell would duplicate date arithmetic in YAML. |
-| Trailing window length | 48 h for AirNow and apply | 24 h; since the last successful run | 48 h is AirNow's own revision horizon and covers a missed daily fit for apply; "since last run" needs state the pipeline deliberately has none of. |
-| Fit `as_of` | Most recent 00:00 UTC | The current hour | Daily refits keyed on midnight are idempotent within the day and produce a readable fit history; calibration accepts any hour for backfill. |
-| PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | Explicit `--postgis` flag; never from the CLI | The environment already says whether a serving layer exists; a developer's Codespace run should refresh it without remembering a flag, and runners cannot load one. |
-| Trigger | GitHub Actions cron, one workflow per run | One workflow with several crons branching on `github.event.schedule`; AWS EventBridge | Per-run workflows keep each schedule, its secrets, and its concurrency group readable in one file. The HLD records why Actions over AWS. |
-| Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | Concurrency groups as the guarantee; a lock service | A property of one trigger cannot protect every caller (a hand-run command, a dispatch backfill, a future orchestrator); the invariant is the store's and is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
-| Serializing fit and apply | Shared concurrency group `calibrate` | Separate groups; fit and apply as one job | Both aggregate the same sensor hours; a shared group keeps them from doing that work twice at once while keeping distinct schedules. |
-| Cadence: PurpleAir 15 min | 15 minutes | 5; 30; 60 | Four snapshots an hour comfortably samples each hour; 5 minutes quadruples runner use and API points for no consumer that needs it; hourly risks an hour with a single snapshot when a run is late. |
-| Runner installation | `uv sync --no-dev` | Full sync; a prebuilt container image | Runs need no test tooling; a container image is the AWS alternative's cost, not this one's. |
-| Output | One JSON line per run on stdout | Human-readable summary; nothing | Machine-readable in logs, grep-able across runs, and a future orchestrator can parse it. |
-| Retries | None at the CLI | Retry the run on failure | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |
-| Activation | Job-level gate on the repository variable `AQDT_SCHEDULES_ENABLED`; dispatch runs ungated | Commit the `schedule` trigger only when ready; disable workflows in the UI | Landing and activating are different decisions with different reviewers (code review vs. "are the secrets right?"); a variable flips without a commit, is visible in the UI, and leaves the dispatch path open for manual verification. Disabling in the UI is per-workflow, undocumented in the repo, and silently reset by some workflow edits. |
-| Secrets vs. variables | Credentials as secrets, configuration as variables | Everything as secrets | Variables are visible in the workflow UI, which is what a reader of a failed run wants for the bucket and bounding box; keys stay masked. |
+| Decision | Chosen | Rationale |
+|----------|--------|-----------|
+| CLI library | `argparse` (standard library) | Six sub-commands with a handful of options; the standard library covers them with no dependency version to track. |
+| Entry point | Console script `aqdt` plus `python -m aqdt` | One name for every trigger to invoke; `-m` costs one file and helps when the script is not on `PATH`. |
+| Where the clock enters | Only in resolving a routine window in the CLI | Keeps every component a pure function of explicit bounds and puts the one clock read where it is logged and testable. |
+| Trailing window length | 48 h for AirNow and apply | 48 h is AirNow's own revision horizon and covers a missed daily fit for apply, and it needs no record of the last run — state the pipeline deliberately keeps none of. |
+| Fit `as_of` | Most recent 00:00 UTC | Daily refits keyed on midnight are idempotent within the day and produce a readable fit history; calibration accepts any hour for backfill. |
+| PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | The environment already says whether a serving layer exists; a developer's Codespace run refreshes it without remembering a flag, and runners have none to load. |
+| Trigger | AWS EventBridge Scheduler → dispatch Lambda → `workflow_dispatch`, one workflow per run | Per-run workflows keep each run's command, secrets, and concurrency group readable in one file. The HLD records why scheduling is external to GitHub Actions. |
+| Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | The invariant must hold for every caller — a hand-run command, a dispatch backfill, a future orchestrator — so it is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
+| Serializing fit and apply | Shared concurrency group `calibrate` | Both aggregate the same sensor hours; a shared group keeps them from doing that work twice at once while keeping distinct schedules. |
+| Cadence: PurpleAir 15 min | 15 minutes | Four snapshots an hour comfortably samples each hour, without multiplying runner use and API points for a consumer that needs neither, and without risking an hour with a single snapshot when a run is late. |
+| Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
+| Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |
+| Retries | None at the CLI | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |
+| Activation | Job-level gate on the repository variable `AQDT_SCHEDULES_ENABLED`; dispatch runs ungated | Landing and activating are different decisions with different reviewers (code review vs. "are the secrets right?"); a variable flips without a commit and is visible in the UI, while the dispatch path stays open for manual verification. |
+| Secrets vs. variables | Credentials as secrets, configuration as variables | Variables are visible in the workflow UI, which is what a reader of a failed run wants for the bucket and bounding box; keys stay masked. |
 
 ## Open Questions & Future Decisions
 
-### Resolved
-
-1. ✅ The hour in progress is never part of a routine window; it is requested by the next run.
-2. ✅ Apply does not wait for fit: an apply run that precedes a late fit is repaired by the next
-   apply, whose trailing window covers the affected hours.
-3. ✅ A run whose archive write succeeds but whose PostGIS load fails exits non-zero: the archive
-   is intact and the next `aqdt db rebuild` repairs the serving layer, but the run did not do
-   what was asked and must say so.
-4. ✅ A queued scheduled run superseded by a newer queued run is reported by GitHub as
-   cancelled, not failed; the newer run covers its window.
-5. ✅ A scheduled run and a hand-started run may write the same partition at once; the store's
-   compare-and-swap makes that safe, so no trigger-level guard is needed for correctness.
-
-### Deferred
-
-1. GitHub disables scheduled workflows on a repository with no commits for 60 days. A
-   long-running collection period without code changes needs either periodic activity or a
-   re-enable; decide when the project reaches steady state.
-2. Runner minutes: the cadences assume a public repository (unlimited minutes). On a private
-   repository the PurpleAir schedule alone would exceed the free tier; reduce cadence or
-   revisit the AWS alternative.
-3. PurpleAir API points: 96 snapshots a day over ~100 sensors and 9 fields is a measurable share
+1. Runner minutes: the cadences assume a public repository (unlimited minutes). On a private
+   repository the PurpleAir cadence alone would exceed the free tier; reduce cadence or move
+   execution off GitHub Actions.
+2. PurpleAir API points: 96 snapshots a day over ~100 sensors and 9 fields is a measurable share
    of a free-tier points budget; confirm against the account's allocation after the first week.
-4. Whether `workflow_dispatch` backfills should also accept a `--hours` input; start with
+3. Whether `workflow_dispatch` backfills should also accept a `--hours` input; start with
    explicit bounds only.
-5. Whether a Codespace should run `aqdt db rebuild` on resume as well as on create; today a
+4. Whether a Codespace should run `aqdt db rebuild` on resume as well as on create; today a
    developer runs it by hand.
-6. Whether the AWS principal used by runners should be scoped to the archive prefix only
+5. Whether the AWS principal used by runners should be scoped to the archive prefix only
    (`s3:GetObject`, `PutObject`, `ListBucket`, `DeleteObject` on `bucket/prefix/*`); verify the
    current user's policy before activation.
 
