@@ -27,7 +27,7 @@ hourly values), `STORE` (product schemas, archive layout, PostGIS tables), `RUN`
 
 ## Matching
 
-- [x] **CAL-MATCH-001**: When fitting for an `as_of`, calibration shall match every `low_cost_sensor` site present in the sites table, whether or not it has `SensorHourly` rows in the fitting window.
+- [x] **CAL-MATCH-001**: When fitting for an `as_of`, calibration shall match every `low_cost_sensor` site the archive's sites hold (`read_sites`), whether or not it has `SensorHourly` rows in the fitting window.
 - [x] **CAL-MATCH-002**: When matching a sensor, calibration shall consider only `reference_monitor` sites that have at least one trusted observation (CAL-IN-002) with `observed_at` in the fitting window `[as_of − window_days, as_of)`.
 - [x] **CAL-MATCH-003**: When matching a sensor, calibration shall select the eligible monitor with the smallest distance to the sensor, computed in metres after projecting both points to EPSG:26918, and record it as `ref_site_id` with that distance as `distance_m`.
 - [x] **CAL-MATCH-004**: If no eligible monitor lies within `max_distance_m` (default 10 000) of a sensor, then calibration shall match the sensor to nothing (`ref_site_id` and `distance_m` null) and route it to the pooled fit.
@@ -68,7 +68,7 @@ hourly values), `STORE` (product schemas, archive layout, PostGIS tables), `RUN`
 
 - [x] **CAL-RUN-001**: Calibration shall expose `fit_calibrations(archive_uri, as_of, settings, conn=None) -> list[CalibrationFit]`, which shall aggregate sensor hours over `[as_of − window_days, as_of)`, write the `SensorHourly` rows, match, fit, write the fits, — when `conn` is given — call the store's `load_partitions` with every partition it wrote, and return the fits.
 - [x] **CAL-RUN-002**: Calibration shall expose `apply_calibrations(archive_uri, start, end, settings, conn=None) -> frame`, which shall aggregate sensor hours over `[start, end)`, write the `SensorHourly` rows, apply the applicable fits, write the `CalibratedHourly` rows, — when `conn` is given — call the store's `load_partitions` with every partition it wrote, and return the calibrated rows as a validated frame.
-- [x] **CAL-RUN-003**: `fit_calibrations` and `apply_calibrations` shall require `as_of`, `start`, and `end` to be timezone-aware UTC datetimes truncated to the hour, and shall fail with a validation error if any is naive or if `end <= start`.
+- [x] **CAL-RUN-003**: `fit_calibrations` and `apply_calibrations` shall require `as_of`, `start`, and `end` to be timezone-aware datetimes, shall convert each to UTC and truncate it to the hour before use, and shall fail with a validation error if any is naive or if `end <= start` after truncation.
 - [x] **CAL-RUN-004**: Two `fit_calibrations` runs with the same `as_of` and settings against an unchanged archive shall produce equal `CalibrationFit` rows and byte-identical fit partitions; two `apply_calibrations` runs over the same window against an unchanged archive shall likewise produce identical `CalibratedHourly` partitions.
 - [x] **CAL-RUN-005**: When `fit_calibrations` is re-run for an `as_of` after the archive has changed, calibration shall replace the previously written fits for that `as_of` (through the store's incoming-wins merge) rather than keeping both.
 - [x] **CAL-RUN-006**: When the fitting window contains no trusted, corrected sensor observation at all, `fit_calibrations` shall complete successfully with every sensor `uncalibrated` and shall write fit rows saying so.

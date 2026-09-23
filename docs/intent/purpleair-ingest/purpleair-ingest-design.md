@@ -65,8 +65,8 @@ the source, not a quality judgement on a reading.
 | `pm2_5_cf_1_a` | `float \| None` | alias `pm2.5_cf_1_a` |
 | `pm2_5_cf_1_b` | `float \| None` | alias `pm2.5_cf_1_b` |
 
-A row that fails this model (missing `sensor_index`, missing or non-numeric coordinates,
-unparseable `last_seen`) is a boundary rejection: it is counted in the run summary with its reason
+A row that fails this model (missing `sensor_index`, missing, non-numeric, or out-of-range
+coordinates, missing or unparseable `last_seen`) is a boundary rejection: it is counted in the run summary with its reason
 and is not turned into an observation. Nulls in any PM or humidity field are *valid* at the
 boundary — they become QC flags, not rejections.
 
@@ -144,7 +144,8 @@ distance-aware calibration against AirNow monitors, which is a later component c
 6. Return the summary.
 
 `IngestSummary` is the observation store's summary model, with `snapshot_at` set to the
-response's `data_time_stamp` and the window fields unset.
+response's `data_time_stamp`, the window fields unset, and `context` 0 (a snapshot fetches no
+row it does not write).
 
 A payload with zero rows is a successful run: the summary reports `fetched=0` and nothing is
 written. The ingester does not deduplicate sensors within a snapshot; if the API ever returns the
@@ -196,9 +197,7 @@ tests/fixtures/purpleair/   # recorded snapshot payloads, including a channel-B 
    snapshots). The dual-channel check catches the observed fault mode; a stuck sensor with both
    channels stuck alike would not be caught.
 3. Persisting boundary rejections (shared with the observation store's open question).
-4. Verify the relative-difference threshold (0.61, "2 SD" in the source) against Barkjohn et al.
-   2021 §2 before the constant is committed to code.
-5. Sensor clock-skew detection (a `last_seen` ahead of the response's `data_time_stamp`). Any such
+4. Sensor clock-skew detection (a `last_seen` ahead of the response's `data_time_stamp`). Any such
    flag must be deterministic for a given `(site_id, last_seen)`, which rules out comparing
    against the response timestamp: that value changes from poll to poll, and storing it on the row
    would make identical sensor rows differ across polls. Today a clock-ahead sensor lands in the

@@ -98,6 +98,7 @@ def ingest_purpleair(
         fetched=len(snapshot.rows),
         rejected=dict(rejected),
         written=len(observations),
+        context=0,
         flagged=dict(flagged),
         partitions=partitions,
         snapshot_at=snapshot.data_time_stamp,

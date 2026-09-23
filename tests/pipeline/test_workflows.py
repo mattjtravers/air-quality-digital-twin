@@ -26,14 +26,14 @@ EXPECTED = {
     },
     "calibrate-fit.yaml": {
         "command": "aqdt calibrate fit",
-        "group": "calibrate",
+        "group": "calibrate-fit",
         "timeout": 30,
         "inputs": {"as_of"},
         "secrets": set(),
     },
     "calibrate-apply.yaml": {
         "command": "aqdt calibrate apply",
-        "group": "calibrate",
+        "group": "calibrate-apply",
         "timeout": 20,
         "inputs": {"start", "end"},
         "secrets": set(),

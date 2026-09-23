@@ -121,13 +121,13 @@ class Observation(BaseModel):
         return records
 
 
-# @spec OBS-SCHEMA-010, OBS-SCHEMA-014, OBS-SCHEMA-015
+# @spec OBS-SCHEMA-010, OBS-SCHEMA-014, OBS-SCHEMA-015, OBS-SCHEMA-017
 class IngestSummary(BaseModel):
     """What every ingester returns from a run, so callers see one shape.
 
-    Invariant: ``fetched == written + sum(rejected.values())`` — every source row is either an
-    observation handed to the store or a counted boundary rejection. ``written`` includes any
-    hours re-emitted for lookback. Windows are half-open ``[window_start, window_end)``.
+    Invariant: ``fetched == written + context + sum(rejected.values())`` — every source row is an
+    observation handed to the store, a row fetched only as QC context and not written, or a
+    counted boundary rejection. Windows are half-open ``[window_start, window_end)``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -136,6 +136,7 @@ class IngestSummary(BaseModel):
     fetched: int = Field(ge=0)
     rejected: dict[str, int]
     written: int = Field(ge=0)
+    context: int = Field(ge=0)
     flagged: dict[QcFlag, int]
     partitions: list[str]
     snapshot_at: datetime | None
@@ -145,9 +146,10 @@ class IngestSummary(BaseModel):
     @model_validator(mode="after")
     def _accounted_for(self) -> IngestSummary:
         rejected = sum(self.rejected.values())
-        if self.fetched != self.written + rejected:
+        if self.fetched != self.written + self.context + rejected:
             raise ValueError(
-                f"fetched ({self.fetched}) != written ({self.written}) + rejected ({rejected})"
+                f"fetched ({self.fetched}) != written ({self.written}) + context "
+                f"({self.context}) + rejected ({rejected})"
             )
         if (
             self.window_start is not None

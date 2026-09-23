@@ -49,11 +49,17 @@ def test_one_config_environment_per_stack():
 
 
 # @spec INFRA-OPS-003
-@pytest.mark.parametrize("environment", ["foundation", "dispatch"])
-def test_region_is_pinned_and_iam_is_acknowledged(environment):
+@pytest.mark.parametrize(
+    ("environment", "capabilities"),
+    [
+        ("foundation", {"CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"}),
+        ("dispatch", {"CAPABILITY_IAM"}),
+    ],
+)
+def test_region_is_pinned_and_iam_is_acknowledged(environment, capabilities):
     parameters = samconfig()[environment]["deploy"]["parameters"]
     assert parameters["region"] == REGION
-    assert "CAPABILITY_IAM" in parameters["capabilities"]
+    assert set(parameters["capabilities"].split()) == capabilities
 
 
 # @spec INFRA-OPS-004

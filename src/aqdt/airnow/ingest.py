@@ -1,5 +1,6 @@
 """The AirNow run: a half-open window (extended back for flatline lookback) → validated rows →
-site normalization → per-site QC → canonical records → the store."""
+site normalization → per-site QC over the whole fetch → canonical records for the window → the
+store."""
 
 from __future__ import annotations
 
@@ -43,12 +44,20 @@ def _rejection_reason(error: ValidationError) -> str:
 
 # @spec AN-MAP-001, AN-MAP-002, AN-MAP-003
 def _site_records(
-    site_id: str, resolved: bool, entries: list[tuple[dict[str, Any], AirNowRow]], flatline_hours
-) -> tuple[Site, list[Observation]]:
-    """One ``Site`` (metadata from its latest hour) and an ``Observation`` per row."""
+    site_id: str,
+    resolved: bool,
+    entries: list[tuple[dict[str, Any], AirNowRow]],
+    flatline_hours: int,
+    start: datetime,
+) -> tuple[Site | None, list[Observation]]:
+    """One ``Site`` (metadata from its latest hour) and an ``Observation`` per row at or after
+    ``start``; the earlier rows are lookback context for the flags only. ``None`` for a site
+    whose rows are all context."""
     rows = [row for _, row in entries]
     flags = flags_for_site(rows, flatline_hours)
     latest = rows[-1]
+    if latest.utc < start:
+        return None, []
     site = Site(
         site_id=site_id,
         source=Source.airnow,
@@ -62,6 +71,8 @@ def _site_records(
     )
     observations = []
     for (raw, row), row_flags in zip(entries, flags, strict=True):
+        if row.utc < start:
+            continue
         if not resolved:
             row_flags = [*row_flags, QcFlag.site_id_unresolved]
         observations.append(
@@ -96,8 +107,8 @@ def ingest_airnow(
     """Ingest the half-open window ``[start, end)``.
 
     The fetch is extended back by ``flatline_hours − 1`` so flatline detection sees the hours
-    preceding the window; every fetched hour is written, so the lookback hours are re-emitted
-    with the flags and upstream revisions the longer series now justifies.
+    preceding the window. Only the window's hours are written: a lookback hour was written by the
+    run whose window held it, with more history behind it than it has here.
     """
     start, end = _hour_bound(start, "start"), _hour_bound(end, "end")
     if end <= start:
@@ -126,12 +137,15 @@ def ingest_airnow(
 
     sites: list[Site] = []
     observations: list[Observation] = []
+    context = 0
     for site_id in sorted(by_site):
         entries = sorted(by_site[site_id], key=lambda entry: entry[1].utc)
         site, site_observations = _site_records(
-            site_id, resolved_by_site[site_id], entries, settings.flatline_hours
+            site_id, resolved_by_site[site_id], entries, settings.flatline_hours, start
         )
-        sites.append(site)
+        context += len(entries) - len(site_observations)
+        if site is not None:
+            sites.append(site)
         observations.extend(site_observations)
 
     partitions: list[str] = []
@@ -147,6 +161,7 @@ def ingest_airnow(
         fetched=len(rows),
         rejected=dict(rejected),
         written=len(observations),
+        context=context,
         flagged=dict(flagged),
         partitions=partitions,
         snapshot_at=None,

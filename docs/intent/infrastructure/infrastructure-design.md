@@ -45,11 +45,6 @@ the template rather than generated, so that `AQDT_ARCHIVE_URI` stays a value set
 repository variable and the Codespaces secret with nothing reading stack outputs. The
 account-and-region suffix is what makes a globally unique S3 name.
 
-This bucket does not exist yet: the stack creates it. The archive in use before this component
-existed lives in a separate, hand-made bucket under a different name, which the stack neither
-imports nor touches. Moving to the managed bucket is a data copy and a variable change, not a
-migration of the resource — see § Cutover.
-
 - `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, so neither deleting the stack nor a
   template edit that would replace the bucket can take the archive with it.
 - Public access blocked in full; bucket-owner-enforced object ownership.
@@ -78,8 +73,7 @@ assume, with a trust policy restricted to `repo:mattjtravers/air-quality-digital
 permission policy scoped to the archive prefix only — `s3:GetObject`, `s3:PutObject`,
 `s3:DeleteObject` on `{bucket}/{ArchivePrefix}/*` and `s3:ListBucket` on the bucket, conditioned
 on that prefix. `ArchivePrefix` is a parameter defaulting to `dc-metro` rather than a literal,
-because the same prefix is part of `AQDT_ARCHIVE_URI` and the two must not drift. This is what the
-pipeline LLD's standing question about scoping the runner principal asks for.
+because the same prefix is part of `AQDT_ARCHIVE_URI` and the two must not drift.
 
 An IAM OIDC provider is an account-level singleton per issuer URL, and one for
 `token.actions.githubusercontent.com` may already exist from another project in this account.
@@ -89,11 +83,10 @@ provider's ARN as a second parameter and only creates the role. The provider car
 `DeletionPolicy: Retain` either way, so deleting this stack cannot remove an identity provider
 that other stacks in the account depend on.
 
-Declaring the role is additive: it does not disturb the long-lived access keys the workflows use
-today. Switching the workflows from keys to OIDC changes `PIPE-CFG-001` and all four workflow
-files, which is a cascade into the pipeline segment rather than a change this component can make
-alone. Until that lands, the role exists unused and the hand-made IAM user remains the runners'
-principal.
+The workflows authenticate with the long-lived access keys of a hand-made runner IAM user; the
+role sits beside it, unused, until the workflows adopt it. Adopting it changes `PIPE-CFG-001` and
+all four workflow files — a cascade into the pipeline segment (pipeline LLD, open question 5)
+rather than a change this component can make alone.
 
 ### Dispatch stack
 
@@ -121,14 +114,13 @@ names it.
 
 **State, and the maintenance switch.** Every schedule is created with `State: DISABLED` and
 enabled deliberately: a stack deploy is not a decision to start dispatching into `main`, and a
-schedule live the instant the template lands would fire before the token, the workflows'
-triggers, or the archive cutover are necessarily ready.
+schedule live the instant the template lands would fire before the token or the workflows are
+necessarily ready.
 
 A schedule's `State` is also how scheduled runs are turned off and on for a maintenance window.
 Disabling the four schedules stops the dispatch at its source: no Lambda invocation, no workflow
 run, nothing to skip. Manual `workflow_dispatch` runs are unaffected, so a backfill or a
-verification run works while the schedules are off — the property the old repository-variable gate
-provided, obtained here without a gate.
+verification run works while the schedules are off.
 
 `bin/schedules.sh {on|off}` wraps the four `aws scheduler update-schedule` calls, because a
 switch that takes four commands to flip is a switch that gets flipped partially. `status` prints
@@ -289,7 +281,9 @@ single-file function is the same artifact the build would have produced.
 
 Both environments pin `region` to the archive bucket's region rather than inheriting
 `AWS_DEFAULT_REGION`, so a deploy cannot land in a different region from the archive depending on
-a shell variable. `capabilities = "CAPABILITY_IAM"` on both, since each stack creates roles.
+a shell variable. Each stack creates roles, so both acknowledge `CAPABILITY_IAM`; the foundation
+stack also acknowledges `CAPABILITY_NAMED_IAM`, because its runner role carries an explicit
+`RoleName` so the workflows can name the role they assume.
 `.aws-sam/` is git-ignored.
 
 `samconfig.toml` is committed and holds stack names, the region, and capabilities; the parameter
@@ -307,28 +301,10 @@ it:
 
 1. Create the token secret (`aws secretsmanager create-secret`). The dispatch stack deploys
    happily without it and then fails at every invocation.
-2. Deploy the foundation stack. It creates the bucket, so it precedes any cutover.
-3. Copy the existing archive into the new bucket and repoint `AQDT_ARCHIVE_URI` (§ Cutover).
-4. Deploy the dispatch stack. Its schedules arrive `DISABLED`.
-5. Enable the schedules once a manual `workflow_dispatch` run has been seen to succeed against the
-   new archive.
-
-### Cutover
-
-The archive in use before this component existed lives in a hand-made bucket. Moving to the
-managed one is a copy and a variable change:
-
-- `aws s3 sync` the old bucket's `dc-metro/` prefix into the new bucket. Copying rather than
-  starting empty preserves PurpleAir history, which cannot be re-fetched; starting empty would
-  leave every sensor `pooled` or `uncalibrated` until enough hourly pairs accumulate for a
-  per-sensor fit.
-- Repoint `AQDT_ARCHIVE_URI` in the repository variable, the Codespaces secret, and any local
-  environment, then `aqdt db rebuild` so PostGIS matches the new archive.
-- Delete the repository variable `AQDT_SCHEDULES_ENABLED`, which no longer gates anything once the
-  workflows carry no activation condition. Leaving it set would read as a live switch that does
-  nothing.
-- The old bucket is left in place, untouched, as a fallback, and deleted by hand once the managed
-  archive has been collecting for long enough to trust.
+2. Deploy the foundation stack. It creates the bucket the archive lives in, which every run needs.
+3. Deploy the dispatch stack. Its schedules arrive `DISABLED`.
+4. Enable the schedules once a manual `workflow_dispatch` run has been seen to succeed against the
+   archive.
 
 ### Rollback and teardown
 
@@ -394,29 +370,29 @@ request, and that each distinguished failure status raises with its own message.
 
 | Decision | Chosen | Rationale |
 |----------|--------|-----------|
-| IaC tool | AWS SAM | The stack is a Lambda plus schedules, which is what SAM is shaped for, and `ScheduleV2` maps onto EventBridge Scheduler directly. CloudFormation keeps stack state server-side in AWS, which matters here because the Codespace holding any local state is disposable. |
+| IaC tool | AWS SAM | The stack is a Lambda plus schedules, which is what SAM is shaped for, and plain `AWS::Scheduler::Schedule` resources sit beside the function in the same template. CloudFormation keeps stack state server-side in AWS, which matters here because the Codespace holding any local state is disposable. |
 | SAM CLI delivery | `aws-sam-cli` as a dev dependency, invoked `uv run sam` | `uv sync --all-groups` becomes the whole install, with the version pinned in the lockfile like every other tool. |
 | Stack split | Two stacks, by lifetime: foundation and dispatch | The dispatch stack must be safe to delete and redeploy during development; the bucket holding the system of record must not share that property. |
 | Archive bucket name | Pinned explicitly in the template | `AQDT_ARCHIVE_URI` stays a value set once in the repository variable and the Codespaces secret, with nothing plumbing stack outputs into GitHub. |
 | Bucket protection | `DeletionPolicy: Retain`, `UpdateReplacePolicy: Retain`, versioning with 30-day noncurrent expiry | PurpleAir history is not re-fetchable, so a damaged partition cannot be rebuilt from upstream. Retain guards the bucket; versioning guards its contents; expiry bounds the cost of a partition rewritten ~96 times a day. |
-| Runner credential | GitHub OIDC provider and an assumable role scoped to the archive prefix | Removes the long-lived access keys from repository secrets and scopes the principal to exactly what a run needs, which is what the pipeline LLD's open question asks for. Declaring it is additive; adopting it is a pipeline-segment cascade. |
+| Runner credential | GitHub OIDC provider and an assumable role scoped to the archive prefix | Short-lived credentials leave no access key in repository secrets, and the principal can do exactly what a run needs. Declaring it is additive; adopting it is a pipeline-segment cascade. |
 | One Lambda for four schedules | Target workflow passed as the schedule's `Input` | A new cadence becomes a new schedule rather than new code, and there is one dispatch path to test. |
 | Lambda source location | `infra/dispatch/app/`, outside `src/aqdt/` | `CodeUri` bundles what it points at; the pipeline package carries GeoPandas, Pandera, and PyArrow, which a dispatcher must not ship. |
-| Lambda dependencies | None beyond the runtime (`boto3`, `urllib.request`) | No `requirements.txt` means `sam build` copies one file, the package stays kilobytes, and there is no dependency to keep patched in a function that holds a credential. |
+| Lambda dependencies | None beyond the runtime (`boto3`, `urllib.request`) | No `requirements.txt` means the deployment package is one file of kilobytes, `sam deploy` packages it with no build step, and there is no dependency to keep patched in a function that holds a credential. |
 | Schedule jitter | `FlexibleTimeWindow: OFF` | Firing at the stated minute is the property this design exists to obtain. |
 | Token storage | Fine-grained PAT, `Actions: write` on this repository only, in Secrets Manager | The narrowest permission that can start a workflow, held where the template can reference it without expressing it. |
 | Log retention | Log group declared explicitly, `RetentionInDays: 30` | An undeclared Lambda log group retains forever; 30 days outlasts any investigation this dispatcher will prompt. |
 | Deploy region | Pinned in `samconfig.toml` for both stacks | A deploy cannot land in a different region from the archive because of a shell variable. |
 | Template testing | Parse as data and assert structure offline; `sam validate` when the CLI is present | Matches the rest of the suite, which runs in CI without AWS credentials, and keeps infrastructure inside the tests-before-code discipline. |
-| Schedule initial state | `DISABLED`; enabled deliberately after a manual run succeeds | Deploying a template is not a decision to start dispatching into `main`, and a live schedule at deploy time would fire before the token, the workflow triggers, or the archive cutover are necessarily ready. |
-| Maintenance switch | The schedules' own `State`, wrapped by `bin/schedules.sh` | Turning runs off at the source creates no workflow run to skip, and leaves manual dispatch working — the property the old repository-variable gate gave. Once every run arrives as a `workflow_dispatch` event, a gate on the event type cannot tell a scheduled run from a hand-started one, so the distinction has to live where the schedule does. |
+| Schedule initial state | `DISABLED`; enabled deliberately after a manual run succeeds | Deploying a template is not a decision to start dispatching into `main`, and a live schedule at deploy time would fire before the token or the workflows are necessarily ready. |
+| Maintenance switch | The schedules' own `State`, wrapped by `bin/schedules.sh` | Turning runs off at the source creates no workflow run to skip, and leaves manual dispatch working. Because every run arrives as a `workflow_dispatch` event, a gate on the event type cannot tell a scheduled run from a hand-started one, so the distinction has to live where the schedule does. |
 | Scheduler invocation role | A second role, trusted by `scheduler.amazonaws.com`, holding only `lambda:InvokeFunction` on this stack's function | EventBridge Scheduler invokes its target under its own role rather than the function's; keeping it separate from the execution role keeps each grant to one purpose. |
 | Schedule retry policy | `MaximumRetryAttempts: 2`, `MaximumEventAgeInSeconds: 300` | The service default of up to 185 attempts over 24 h turns a non-clearing failure into hundreds of errors and a clearing one into a run dispatched hours after its window. Beyond two quick retries the next occurrence is the retry, as it is for a failed run. |
 | Secret grant | `...:secret:{name}-??????` | A Secrets Manager ARN ends in a six-character suffix assigned at creation, so it cannot be composed from the name; the wildcard is the narrowest grant expressible from a name, and it survives a secret recreated under the same name. |
 | OIDC provider creation | Parameterized: create it, or take an existing provider's ARN; `DeletionPolicy: Retain` either way | An IAM OIDC provider is an account-level singleton per issuer URL, so creating a second fails and deleting this stack would otherwise remove one that other stacks depend on. |
 | Schedule input | A JSON object with a `workflow` key, validated against an allow-list of the four workflow file names | The value becomes a path segment in the URL the function calls, so it is checked rather than forwarded; an object leaves room for a second key without changing the contract. |
 | Alarm configuration | `Errors`, sum over 15 min, `>= 1`, one evaluation period, `TreatMissingData: notBreaching` | One failed dispatch is worth knowing about given short retries and a daily schedule with no second chance; `notBreaching` keeps the gaps between sparse schedules from alarming on their own. |
-| `samconfig.toml` in version control | Committed, carrying stack names, region, and non-secret parameter overrides | The project's "configuration is environment variables, never files" rule governs what a run reads at runtime; a deploy-time parameter describes a resource and belongs beside the template that consumes it. No value in it is a credential. |
+| `samconfig.toml` in version control | Committed, carrying stack names, region, and capabilities; parameter values are the templates' own `Default`s | The project's "configuration is environment variables, never files" rule governs what a run reads at runtime; a deploy-time parameter describes a resource and belongs beside the template that consumes it. No value in it is a credential. |
 | Ref that scheduled runs execute | `main`, fixed in the stack; no schedule carries a ref | A scheduled run should execute the reviewed definition on the default branch. Running another branch stays possible by hand, where the person doing it chose the branch. |
 | Window bounds on a scheduled dispatch | None; the body carries `ref` only | A dispatched run resolves its own routine window, exactly as a hand-run command does, so the trigger holds no window logic and there is one code path for both. |
 | Duplicate dispatch | Neither detected nor suppressed | Dispatch is at-least-once; tracking dispatch identity across invocations would cost more state than a duplicate costs runner minutes, and the duplicate is a no-op because runs are idempotent. |

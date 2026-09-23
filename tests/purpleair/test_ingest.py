@@ -129,6 +129,7 @@ def test_summary_counts(run, archive_uri):
     assert summary.fetched == 11
     assert summary.rejected == {"latitude": 1}
     assert summary.written == 10
+    assert summary.context == 0
     assert summary.flagged == {
         QcFlag.out_of_range: 3,
         QcFlag.channel_disagreement: 1,

@@ -13,7 +13,9 @@ Nothing in those components knows what time it is, where it is running, or how o
 run — that is what keeps them pure and their archives deterministic. This component is the one
 place those questions are answered. It owns the command-line entry point through which every run
 is invoked, the *routine window* each run covers when invoked with no window (the only place the
-wall clock enters the project), and the GitHub Actions schedules that invoke it.
+wall clock enters the project), the GitHub Actions workflows a run executes in, and the cadence
+each scheduled run follows. The schedules that realize those cadences belong to the
+infrastructure segment.
 
 Three principles:
 
@@ -23,9 +25,10 @@ Three principles:
 2. **The wall clock is a caller convenience, not an input.** A routine window is resolved from the
    current time into explicit bounds *before* a run starts, logged, and passed down as if the
    caller had typed it. Any window can be given explicitly for backfill.
-3. **Late is fine; overlapping is not.** Schedules are best-effort and windows overlap their
-   predecessors, so a delayed run costs latency only. Two runs writing the same archive partition
-   concurrently would lose rows, so runs that can share a partition are serialized.
+3. **Late is fine; lost is not.** Windows overlap their predecessors, so a delayed or missed run
+   costs latency only — the next run covers the gap. What must never happen is a run's rows
+   being lost, and that guarantee sits with the observation store's writes, not with how runs
+   are scheduled.
 
 ## Command-Line Interface
 
@@ -96,8 +99,8 @@ EventBridge schedule dispatched it or a person did.
 |---|---|---|---|
 | `ingest-purpleair.yaml` | every 15 minutes | `aqdt ingest purpleair` | `ingest-purpleair` |
 | `ingest-airnow.yaml` | hourly at :20 | `aqdt ingest airnow` | `ingest-airnow` |
-| `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate` |
-| `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate` |
+| `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate-fit` |
+| `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate-apply` |
 
 Cadence rationale: PurpleAir every 15 minutes gives about four snapshots per sensor-hour, enough
 for hourly aggregation (which imposes no minimum) at 96 requests a day. AirNow at 20 past the
@@ -119,11 +122,13 @@ it runs from, so a workflow change takes effect when it lands on `main`.
 writes are compare-and-swap, so a run started by a schedule, by hand, or by anything else can
 never lose another writer's rows (observation-store LLD § One writer per partition). The
 concurrency groups exist to keep two runs of the same workflow from both spending runner minutes
-on overlapping windows and interleaving their logs: each ingester is serialized with itself, and
-fit and apply share the `calibrate` group because both aggregate the same sensor hours.
-`cancel-in-progress` is false everywhere — a run in progress is never interrupted; a queued run
-may be superseded by a newer queued run, which GitHub reports as cancelled rather than failed and
-which is harmless because the newer run's window covers it.
+on overlapping windows and interleaving their logs, so each workflow has a group of its own.
+`cancel-in-progress` is false everywhere — a run in progress is never interrupted. GitHub keeps
+at most one queued run per group, and a newer queued run supersedes an older one, reported as
+cancelled rather than failed. Between routine runs of one workflow that is harmless, because the
+newer run's window covers the older one's. A queued hand-started backfill is the exception: a
+scheduled run can supersede it, and its window is then not covered, so a backfill is started
+with the schedules off or checked for completion and re-dispatched if it was cancelled.
 
 **Configuration on runners.** Credentials are repository secrets: `PURPLEAIR_API_KEY`,
 `AIRNOW_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Non-secret configuration is
@@ -133,7 +138,7 @@ only what its command needs into the job environment. Nothing is written to the 
 run; the archive is in S3.
 
 **Activation.** A workflow runs whatever dispatch it receives; no job carries an activation
-condition. Because every run now arrives as a `workflow_dispatch` event, a condition here could
+condition. Because every run arrives as a `workflow_dispatch` event, a condition here could
 not tell a scheduled run from a hand-started one, so scheduled runs are turned on and off at their
 source instead — by disabling the EventBridge schedules (infrastructure LLD § Dispatch stack).
 Running a command by hand from the Actions tab therefore works whatever state the schedules are
@@ -171,13 +176,13 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | The environment already says whether a serving layer exists; a developer's Codespace run refreshes it without remembering a flag, and runners have none to load. |
 | Trigger | AWS EventBridge Scheduler → dispatch Lambda → `workflow_dispatch`, one workflow per run | Per-run workflows keep each run's command, secrets, and concurrency group readable in one file. The HLD records why scheduling is external to GitHub Actions. |
 | Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | The invariant must hold for every caller — a hand-run command, a dispatch backfill, a future orchestrator — so it is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
-| Serializing fit and apply | Shared concurrency group `calibrate` | Both aggregate the same sensor hours; a shared group keeps them from doing that work twice at once while keeping distinct schedules. |
+| Concurrency groups | One per workflow | A group only saves duplicated work; correctness is the store's. Sharing a group across workflows would let a queued run of one be superseded by a run of the other — a daily fit replaced by an hourly apply — and the lost run's work would not be covered. |
 | Cadence: PurpleAir 15 min | 15 minutes | Four snapshots an hour comfortably samples each hour, without multiplying runner use and API points for a consumer that needs neither, and without risking an hour with a single snapshot when a run is late. |
 | Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
 | Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |
 | Retries | None at the CLI | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |
 | Activation | No job-level gate; scheduled runs are enabled and disabled through the EventBridge schedules' own state | Once every run arrives as a `workflow_dispatch` event, a condition on the event type cannot tell a scheduled run from a hand-started one. Turning runs off at their source creates no workflow run to skip and leaves manual dispatch working throughout a maintenance window. |
-| Secrets vs. variables | Credentials as secrets, configuration as variables | Variables are visible in the workflow UI, which is what a reader of a failed run wants for the bucket and bounding box; keys stay masked. |
+| Secrets vs. variables | Credentials as secrets, configuration as variables | Variables are visible in the workflow UI, which is what a reader of a failed run wants for the archive URI and region; keys stay masked. |
 
 ## Open Questions & Future Decisions
 
@@ -190,9 +195,9 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
    explicit bounds only.
 4. Whether a Codespace should run `aqdt db rebuild` on resume as well as on create; today a
    developer runs it by hand.
-5. Whether the AWS principal used by runners should be scoped to the archive prefix only
-   (`s3:GetObject`, `PutObject`, `ListBucket`, `DeleteObject` on `bucket/prefix/*`); verify the
-   current user's policy before activation.
+5. Adopting the infrastructure segment's OIDC runner role, which is scoped to the archive prefix,
+   in place of the long-lived access keys. It changes `PIPE-CFG-001` and all four workflows (an
+   `id-token: write` permission and a credentials step in place of the key secrets).
 
 ## References
 

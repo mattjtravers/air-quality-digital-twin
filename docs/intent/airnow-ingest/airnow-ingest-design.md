@@ -99,8 +99,8 @@ Normalization takes both codes as received and applies, to each:
 | 8 | full AQS code with a lost leading zero in the state | `840` + `0` + code |
 | other, or non-numeric | unresolvable | — |
 
-The result is the normalized value the two codes agree on. If only one code is present or
-resolvable, its result is used. If both resolve and disagree, or neither resolves, the site is
+The result is the normalized value the two codes agree on. If only one code
+resolves, its result is used. If both resolve and disagree, or neither resolves, the site is
 unresolved: `site_id` becomes `airnow:unresolved:{IntlAQSCode or FullAQSCode as received, or
 SiteName}` and every observation from that site carries `site_id_unresolved`.
 
@@ -118,14 +118,17 @@ code with any country prefix is accepted unchanged.
 
 Flatline detection needs the hours before the requested window. The run therefore fetches
 `[start − (flatline_hours − 1) h, end)` and evaluates flatlines over the whole fetched series per
-site. Every fetched hour is written — the earlier hours re-emitted with whatever flags the longer
-series now justifies, and with any upstream revisions AirNow has published since — and the
-store's incoming-wins merge applies them.
+site, but writes only the hours inside `[start, end)`. The lookback hours are context, not
+output: each of them belongs to an earlier window, whose run evaluated it with its own lookback
+behind it. Rewriting it here — where it sits at the very start of the fetched series, with less
+history before it than that run saw — would strip the flag from the tail of any flatline that
+ends there, and the store's incoming-wins merge would make the weaker verdict stick.
 
 The trailing edge is the mirror case: a flatline that begins in the last `flatline_hours − 1`
-hours of a window cannot be recognised until a later run re-fetches those hours. Routine runs
-overlap their predecessor by far more than that, so the flags arrive one run late rather than
-never; this is expected, not a defect.
+hours of a window cannot be recognised until a later run re-fetches those hours. Routine windows
+overlap their predecessor by far more than that, and the last run to write an hour is the one
+whose window starts at it — with the full lookback behind it and the rest of the window ahead —
+so the flags arrive one run late rather than never; this is expected, not a defect.
 
 No corrected value is produced: `pm25_corrected` is null for reference monitors, and `pm25_raw`
 is the value calibration treats as truth.
@@ -162,7 +165,8 @@ is the value calibration treats as truth.
    fetch in 24-hour chunks.
 2. Validate each row into `AirNowRow`; collect boundary rejections.
 3. Normalize site identifiers; reject site-hour duplicates; group rows by site and sort by hour.
-4. Apply QC per site; build `Site` and `Observation` records.
+4. Apply QC per site over the whole fetched series; build `Observation` records for the hours in
+   `[start, end)`, and a `Site` for each site that has one.
 5. Write sites then observations to the store.
 6. If a PostGIS connection was given, load the partitions just written (`load_partitions`).
 7. Return the summary.
@@ -174,8 +178,9 @@ update, so each run also collects the revisions to preliminary data; a backfill 
 window. A response with zero rows is a successful run reporting `fetched=0`.
 
 `IngestSummary` is the observation store's summary model, with `window_start`/`window_end` set
-to the requested (unextended) half-open window and `snapshot_at` unset. `written` counts every
-fetched hour handed to the store, lookback hours included, so `fetched == written + Σ rejected`.
+to the requested (unextended) half-open window and `snapshot_at` unset. `written` counts the
+observations handed to the store and `context` the validated lookback rows fetched only for
+flatline detection, so `fetched == written + context + Σ rejected`.
 
 Settings (`AirNowSettings`, Pydantic settings from the environment): `AIRNOW_API_KEY`
 (required), `bbox` (the store's `DC_METRO` unless `AQDT_BBOX` overrides it), `flatline_hours`,
@@ -203,7 +208,7 @@ tests/fixtures/airnow/   # recorded responses: clean, AQI-0 flatline, malformed 
 | Canonical site identifier | 12-digit international AQS code | The international code is the most specific published identifier and is what AQS itself uses; site names change and are not unique. |
 | Lost-leading-zero repair | Pad 8→9 and 11→12 digits | A numeric-typed identifier losing its leading zero is a known, mechanical failure mode of upstream pipelines, and the repair is unambiguous for AQS codes, whose fixed-width structure makes the missing position certain. |
 | Conflicting codes | Unresolved, flagged | Two identifiers that disagree after normalization mean the row's identity is genuinely uncertain; guessing would silently join observations to the wrong site. |
-| Flatline lookback | Over-fetch `flatline_hours − 1` hours before the window | Over-fetching removes a read dependency on the archive, and re-fetching recent hours also picks up AirNow's revisions to preliminary data, which the archive wants anyway. |
+| Flatline lookback | Over-fetch `flatline_hours − 1` hours before the window as context; write only the window | Over-fetching removes a read dependency on the archive. Each hour's final flags come from the run whose window starts at it, which has the full lookback behind it; writing the lookback hours too would let a run with less history overwrite a correct flag. AirNow's revisions are collected by the 48-hour window itself. |
 | Flatline threshold | 3 consecutive identical hours, configurable | Matches the observed fault; hourly urban PM2.5 at 0.1 µg/m³ resolution rarely repeats three times by chance, and a false positive only moves a reading out of the trusted set, it does not remove it. |
 | Duplicate site-hour in one run | Keep first, count the rest as boundary rejections | AirNow does not expose the AQS parameter-occurrence code, so two co-located PM2.5 instruments at one site can legitimately appear as two rows. Keeping the first tolerates that shape; counting the rest keeps it visible. |
 | Mobile monitors | Excluded at the query (`monitorType=0`) | A mobile monitor has no fixed site identity; nothing downstream could join it. |

@@ -52,9 +52,9 @@ aggregate for hour `H` and the monitor's observation at `H` cover the same hour.
 
 ## Matching
 
-Every `low_cost_sensor` site in the store's sites table is matched, whether or not it reported
+Every `low_cost_sensor` site in the archive's sites is matched, whether or not it reported
 in the window, so every sensor has a fit row for every `as_of`. For each, the reference monitor
-is the nearest `reference_monitor` site by great-circle distance within `max_distance_m` (default
+is the nearest `reference_monitor` site by distance in metres within `max_distance_m` (default
 10 000 m) **among monitors with at least one trusted observation in the fitting window** — a
 monitor with no comparable data in the window is not a comparison, however close it is. The match
 is recorded on the fit as `ref_site_id` and `distance_m`. A site with no eligible reference within
@@ -117,8 +117,8 @@ Reference monitors are not calibrated; the fusion layer takes their `pm25_raw` d
 Both runs write the `SensorHourly` rows they aggregate, so the product is complete for every
 window either run has touched. Given a PostGIS connection, each run ends by loading the
 partitions it wrote through the store's `load_partitions`; without one it touches the archive
-only. `as_of`, `start`, and `end` are tz-aware UTC truncated to the
-hour; a naive value or `end ≤ start` fails validation. A fitting window with no trusted,
+only. `as_of`, `start`, and `end` must be tz-aware; each is converted to UTC and truncated to
+the hour before use, and a naive value or `end ≤ start` fails validation. A fitting window with no trusted,
 corrected sensor observation is a successful run that writes every sensor as `uncalibrated` —
 the absence of a fit is itself a recorded fact.
 
@@ -180,7 +180,7 @@ tests/calibration/
 | Acceptance gate | `n_pairs ≥ 72` and `slope > 0` | A negative slope means the pairing is meaningless. `r2` is deliberately not gated on: it depends on how much the air varied in the window rather than on the sensor, so gating on it would reject good sensors in calm weeks. |
 | Fallback | Pooled OLS over accepted sensors' pairs | The pooled fit is the network's average bias and gain — a better estimate than none for a sensor with no usable reference. |
 | Reference eligibility | Nearest monitor with at least one trusted observation in the window | A monitor with no data in the window yields zero pairs and would push the sensor to the pooled fit even when a slightly farther monitor has a full month; the match should be between things that can be compared. |
-| Sensors that receive a fit row | Every `low_cost_sensor` site in the sites table, per `as_of` | "What is this sensor's fit?" always has one answer, and a silent sensor is visibly `pooled` or `uncalibrated` rather than absent. |
+| Sensors that receive a fit row | Every `low_cost_sensor` site in the archive, per `as_of` | "What is this sensor's fit?" always has one answer, and a silent sensor is visibly `pooled` or `uncalibrated` rather than absent. |
 | Pooled-fit gate | Same `slope > 0` as per-sensor fits | A negative network-wide slope is as meaningless as a negative per-sensor one; serving it would calibrate every fallback sensor backwards. |
 | Fit-age cap when applying | None; `fit_as_of` recorded | A stale fit is a better estimate than none, and the row says how stale it is; a cap would silently drop sensors during any gap in fit runs. |
 | Hourly aggregation minimum | None; `n_snapshots` recorded | Snapshot density reflects ingestion cadence, not sensor quality; consumers can filter on the count. |

@@ -165,6 +165,7 @@ def _summary(**overrides):
         "fetched": 5,
         "rejected": {"missing_sensor_index": 1},
         "written": 4,
+        "context": 0,
         "flagged": {QcFlag.out_of_range: 2},
         "partitions": ["file:///tmp/a"],
         "snapshot_at": T0,
@@ -182,6 +183,7 @@ def test_ingest_summary_fields():
         "fetched",
         "rejected",
         "written",
+        "context",
         "flagged",
         "partitions",
         "snapshot_at",
@@ -193,15 +195,18 @@ def test_ingest_summary_fields():
     assert summary.rejected == {"missing_sensor_index": 1}
 
 
-# @spec OBS-SCHEMA-014
-def test_ingest_summary_enforces_fetched_equals_written_plus_rejected():
+# @spec OBS-SCHEMA-014, OBS-SCHEMA-017
+def test_ingest_summary_enforces_fetched_equals_written_plus_context_plus_rejected():
     assert _summary(fetched=5, written=4, rejected={"a": 1}).fetched == 5
     assert _summary(fetched=0, written=0, rejected={}).written == 0
+    assert _summary(fetched=7, written=4, context=2, rejected={"a": 1}).context == 2
     with pytest.raises(ValidationError):
         _summary(fetched=5, written=4, rejected={"a": 2})
+    with pytest.raises(ValidationError):
+        _summary(fetched=5, written=4, context=1, rejected={"a": 1})
 
 
-# @spec OBS-SCHEMA-015
+# @spec OBS-SCHEMA-015, OBS-SCHEMA-017
 def test_ingest_summary_window_is_half_open():
     end = T0 + timedelta(hours=24)
     summary = _summary(snapshot_at=None, window_start=T0, window_end=end)

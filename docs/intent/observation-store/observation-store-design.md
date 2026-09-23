@@ -105,14 +105,15 @@ What every ingester returns from a run, so callers and the future orchestrator s
 | `source` | `Source` | |
 | `fetched` | `int` | Rows in the source payload(s). |
 | `rejected` | `dict[str, int]` | Boundary-rejection reason → count. |
-| `written` | `int` | Observations handed to the store, including any hours re-emitted for lookback. |
+| `written` | `int` | Observations handed to the store. |
+| `context` | `int` | Valid source rows fetched only as context for QC on the run's own rows (AirNow's flatline lookback) and not written; 0 for sources that need none. |
 | `flagged` | `dict[QcFlag, int]` | Flag → number of observations carrying it. |
 | `partitions` | `list[str]` | Archive partition URIs touched. |
 | `snapshot_at` | `datetime \| None` | Snapshot sources: the payload's own timestamp. |
 | `window_start`, `window_end` | `datetime \| None` | Windowed sources: the requested window, half-open. |
 
-Invariant: `fetched == written + sum(rejected.values())` — every source row is either an
-observation handed to the store or a counted rejection. The model enforces it, and
+Invariant: `fetched == written + context + sum(rejected.values())` — every source row is an
+observation handed to the store, a context row, or a counted rejection. The model enforces it, and
 `window_start < window_end`, on construction, so every ingester inherits the check.
 
 ### BoundingBox
@@ -255,7 +256,7 @@ this itself rather than asking every caller to serialize:
   the store re-reads, re-merges its rows into what is now stored, and writes again, up to a
   bounded number of attempts (5) before failing the run. Nothing is locked, so a crashed writer
   leaves nothing to clean up, and a losing writer loses only the cost of one merge.
-- **Local filesystem: an advisory lock.** A `flock` on `{filename}.lock` beside the partition is
+- **Local filesystem: an advisory lock.** A `flock` on `.{filename}.lock` beside the partition is
   held across read-merge-write; the atomic rename happens inside it. Local archives are for
   tests and offline development, where a lock file costs nothing.
 
@@ -431,12 +432,14 @@ src/aqdt/
   registry.py      # PRODUCTS: every product in the project, in load order
   purpleair/       # purpleair-ingest segment
   airnow/          # airnow-ingest segment
-  calibration/     # calibration segment (a later increment)
+  calibration/     # calibration segment
+  pipeline/        # pipeline segment (the aqdt CLI)
 tests/
   observation_store/
   purpleair/
   airnow/
   calibration/
+  pipeline/
 ```
 
 `aqdt` is the import package for the whole project (`src/` layout, declared in `pyproject.toml`).
@@ -448,7 +451,7 @@ tests/
 | Where site coordinates live | On both `Site` (latest) and every `Observation` (as observed) | Sensors get relocated, so the observation must record where it was measured, while spatial queries against "the site" want one current point. Denormalization is cheap at this volume. |
 | Provenance of raw payload | Full source record stored as `raw` JSON on every observation | One column satisfies "traceable to raw payload" with no join and no second store; row volume is small (hundreds of sites, hourly-ish). |
 | Ingestion timestamp / run id | Not stored on rows | Any per-run value would make re-runs non-identical and break the deterministic-write guarantee. Run bookkeeping belongs to the orchestrator when one exists. |
-| Concurrent writers to one partition | The store guarantees one writer per partition: compare-and-swap (`If-Match` on the ETag) on S3, an advisory file lock locally, re-read and re-merge on refusal | The invariant is the store's: a guarantee that depended on which trigger started a run could not cover a hand-run command or a future orchestrator. Compare-and-swap leaves nothing behind when a writer crashes and costs one extra merge only when two writers actually collide, which at a handful of writes a day per partition is rare. |
+| Concurrent writers to one partition | The store guarantees one writer per partition: compare-and-swap (`If-Match` on the ETag) on S3, an advisory file lock locally, re-read and re-merge on refusal | The invariant is the store's: a guarantee that depended on which trigger started a run could not cover a hand-run command or a future orchestrator. Compare-and-swap leaves nothing behind when a writer crashes and costs one extra merge only when two writers actually collide. Writes to one partition are minutes apart at their densest (a PurpleAir partition every 15 minutes), so collisions are rare and a retry is cheap. |
 | Merge policy on re-write | Incoming record wins on `(site_id, observed_at)` | Upstream revisions (AirNow preliminary data) should replace earlier values, and nothing downstream needs a per-row version history. |
 | Partition key | `{source}/date={UTC date}` | Daily files stay small enough to rewrite atomically and large enough to avoid file sprawl; source-first lets a run touch only its own tree. |
 | Archive location | S3 bucket, addressed by `fsspec` URI | A Codespace and its volumes are deleted after inactivity, so nothing inside it can be the system of record. S3 is the durable, sector-standard home for cloud-native GeoParquet and is read natively by GeoPandas/pyarrow. |
@@ -462,7 +465,7 @@ tests/
 | Trusted-observation definition | `qc_flags == []` | One rule, no second field to keep consistent; downstream stages that want to tolerate specific flags filter on the list. |
 | Boundary validation failures | Counted and reported by the ingester; not stored as observations | A record that cannot be parsed into the schema is not an observation; flag-never-drop governs observations that exist. Whether to persist rejects for audit is open (see below). |
 | PostGIS access | `psycopg` with explicit SQL | Upsert semantics need `on conflict`; explicit SQL keeps the dependency set to one driver and the schema in plain files a DBA can read. |
-| Schema migrations | Ordered SQL files, idempotent `create if not exists` | Two tables and no ORM; revisit when a destructive change is needed. |
+| Schema migrations | Ordered SQL files, idempotent `create if not exists` | A handful of tables and no ORM; revisit when a destructive change is needed. |
 | GeoParquet writer | GeoPandas `to_parquet` | GeoPandas writes standards-compliant GeoParquet metadata and is already the read tool of choice. |
 | Write mechanics for derived products | Store exposes `write_partitioned` / `read_partitioned` over a `Product` definition; products own their schemas and tables | One implementation of determinism, atomicity, and validation is easier to get right and keep right than one per component, and leaving schema ownership with each component keeps the store from being a bottleneck for every later layer's design. |
 | Partition keys | Derived by functions on the frame, rendered to strings | The observation key `date` is a function of `observed_at`, and frame models forbid extra columns; deriving keeps the archive schema equal to the record schema. |

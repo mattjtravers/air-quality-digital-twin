@@ -8,23 +8,26 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-The HLD (`docs/high-level-design.md`) and five leaf LLDs under `docs/intent/` —
+The HLD (`docs/high-level-design.md`) and six leaf LLDs under `docs/intent/` —
 `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), `calibration`
-(`CAL`), and `pipeline` (`PIPE`) — are drafted with EARS specs and tests beside each, and all
-five segments are implemented under `src/aqdt/` (`observation_store/`, `purpleair/`, `airnow/`,
-`calibration/`, `pipeline/`, plus `registry.py` listing every archive product in load order).
+(`CAL`), `pipeline` (`PIPE`), and `infrastructure` (`INFRA`) — are drafted with EARS specs and
+tests beside each, and all six segments are implemented: five under `src/aqdt/`
+(`observation_store/`, `purpleair/`, `airnow/`, `calibration/`, `pipeline/`, plus `registry.py`
+listing every archive product in load order) and the infrastructure as SAM templates and the
+dispatch Lambda under `infra/`, with `samconfig.toml` and `bin/schedules.sh`.
 The `[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read
 the HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
 schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
 Every run is invoked through the `aqdt` CLI (`aqdt ingest purpleair|airnow`, `aqdt calibrate
 fit|apply`, `aqdt db schema|rebuild`); the four `.github/workflows/{ingest-*,calibrate-*}.yaml`
-cron workflows invoke it on a schedule, gated on the repository variable
-`AQDT_SCHEDULES_ENABLED`.
+workflows invoke it and declare `workflow_dispatch` as their only trigger. AWS EventBridge
+Scheduler dispatches them on a schedule through a small Lambda; scheduled runs are switched on
+and off with `bin/schedules.sh on|off|status`.
 
 Key architectural facts to keep in mind (rationale in the HLD):
 
-- Runs are idempotent, time-windowed batch, scheduled by GitHub Actions cron — no resident
-  daemon, no orchestrator yet. Runners have no PostGIS; they write the S3 archive only.
+- Runs are idempotent, time-windowed batch, executed on GitHub Actions and triggered by
+  EventBridge Scheduler — no resident daemon, no orchestrator yet. Runners have no PostGIS; they write the S3 archive only.
 - The GeoParquet archive in S3 is the system of record; PostGIS (docker-compose sidecar in the
   Codespace) is a rebuildable cache. The Codespace and everything in it is disposable.
 - QC flags, never drops. Raw values and the raw source record are always preserved.
@@ -70,8 +73,8 @@ CI (`.github/workflows/ci.yaml`) runs `uv sync --all-groups`, `uv run ruff check
 `uv run pytest` on every push/PR to `main` — match this locally before pushing.
 
 Python requirement: `>=3.11`. Ruff config: line length 100, rule sets `E`, `F`, `I` (see
-`pyproject.toml`). No runtime dependencies are declared yet; add them in `pyproject.toml` via
-`uv add` as the implementation phases require them.
+`pyproject.toml`). Add dependencies in `pyproject.toml` via `uv add` as the implementation
+phases require them.
 
 ## LID
 - Mode: Full

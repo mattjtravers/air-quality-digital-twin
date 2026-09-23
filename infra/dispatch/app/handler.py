@@ -5,7 +5,7 @@ at, and the pipeline package carries GeoPandas, Pandera and PyArrow, none of whi
 needs. It has no dependencies beyond the Lambda runtime.
 
 @spec INFRA-DISP-003, INFRA-DISP-004, INFRA-DISP-005, INFRA-DISP-006, INFRA-DISP-007
-@spec INFRA-DISP-008, INFRA-DISP-009, INFRA-DISP-015, INFRA-DISP-016
+@spec INFRA-DISP-008, INFRA-DISP-009, INFRA-DISP-015, INFRA-DISP-016, INFRA-DISP-017
 """
 
 from __future__ import annotations
@@ -46,10 +46,13 @@ def _read_token(secret_name: str) -> str:
     return response["SecretString"]
 
 
-def _explain(status: int, workflow: str, ref: str, headers) -> str:
+def _explain(status: int, workflow: str, ref: str, headers, secret_name: str) -> str:
     where = f"dispatching {workflow} at ref {ref}"
     if status == 401:
-        return f"{status} {where}: the token in the configured secret is invalid or expired"
+        return (
+            f"{status} {where}: the token is invalid or expired; replace the value of the "
+            f"secret {secret_name}"
+        )
     if status == 403:
         remaining = (headers or {}).get("x-ratelimit-remaining")
         if remaining is not None and str(remaining) == "0":
@@ -76,7 +79,8 @@ def lambda_handler(event, context):
     owner = os.environ["GITHUB_OWNER"]
     repo = os.environ["GITHUB_REPO"]
     ref = os.environ.get("GITHUB_REF", "main")
-    token = _read_token(os.environ["GITHUB_TOKEN_SECRET_NAME"])
+    secret_name = os.environ["GITHUB_TOKEN_SECRET_NAME"]
+    token = _read_token(secret_name)
 
     # Body carries ref only: a dispatched run resolves its own routine window, exactly as a
     # hand-run command does, so the trigger holds no window logic.
@@ -98,7 +102,7 @@ def lambda_handler(event, context):
             status = response.status
     except urllib.error.HTTPError as error:
         raise DispatchError(
-            _explain(error.code, workflow, ref, getattr(error, "headers", None))
+            _explain(error.code, workflow, ref, getattr(error, "headers", None), secret_name)
         ) from error
     except urllib.error.URLError as error:
         raise DispatchError(
@@ -106,7 +110,7 @@ def lambda_handler(event, context):
         ) from error
 
     if status != 204:
-        raise DispatchError(_explain(status, workflow, ref, None))
+        raise DispatchError(_explain(status, workflow, ref, None, secret_name))
 
     log.info("dispatched %s at ref %s", workflow, ref)
     return {"workflow": workflow, "ref": ref}

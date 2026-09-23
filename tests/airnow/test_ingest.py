@@ -101,7 +101,7 @@ def test_duplicate_site_hour_keeps_first_and_counts_the_rest(settings, archive_u
     )  # same after normalization
     summary, _, observations, _ = run(settings, archive_uri, rows, hour(10), hour(14))
     assert summary.rejected == {"duplicate_site_hour": 2}
-    assert summary.fetched == 14 and summary.written == 12
+    assert summary.fetched == 14 and summary.written == 8 and summary.context == 4
     mcmillan = observations[observations["site_id"] == "airnow:840110010043"].set_index(
         "observed_at"
     )
@@ -117,7 +117,7 @@ def test_boundary_rejections_are_counted_by_field(settings, archive_uri):
     rows.append(row(UTC="bad", FullAQSCode="110010096"))
     summary, _, _, _ = run(settings, archive_uri, rows, hour(10), hour(14))
     assert summary.rejected == {"Parameter": 1, "Unit": 1, "Latitude": 1, "UTC": 1}
-    assert summary.written == 12
+    assert summary.written == 8
 
 
 # @spec AN-QC-006
@@ -128,29 +128,36 @@ def test_lookback_detects_a_flatline_that_starts_before_the_window(settings, arc
     )
     params = replay.requests[0].url.params
     assert (params["startDate"], params["endDate"]) == ("2026-09-20T11", "2026-09-20T15")
+    # Hours 11-12 are lookback context: they decide hour 13's flags but are not written.
     mcmillan = flags_by_hour(observations, "airnow:840110010043")
-    assert mcmillan == {11: ["flatline"], 12: ["flatline"], 13: ["flatline"], 15: []}
+    assert mcmillan == {13: ["flatline"], 15: []}
     arlington = flags_by_hour(observations, "airnow:840510130020")
-    assert arlington == {11: [], 12: [], 13: ["flatline"], 14: ["flatline"], 15: ["flatline"]}
+    assert arlington == {13: ["flatline"], 14: ["flatline"], 15: ["flatline"]}
 
 
 # @spec AN-RUN-003
-def test_lookback_hours_are_written_with_their_new_flags(settings, archive_uri):
-    # First run: hours 10-13 alone, the run at McMillan 10-13 is 4 long and flagged.
-    run(settings, archive_uri, load("flatline"), hour(12), hour(14))
+def test_lookback_hours_are_context_and_keep_the_flags_their_own_window_earned(
+    settings, archive_uri
+):
+    # McMillan is flat over 10-13; the window 10-14 sees all of it and flags every hour.
+    run(settings, archive_uri, load("flatline"), hour(10), hour(14))
     before = flags_by_hour(read_observations(archive_uri), "airnow:840110010043")
-    assert before == {10: ["flatline"], 11: ["flatline"], 12: ["flatline"], 13: ["flatline"]}
-    # Second run over 8-10 re-emits hours 6-9; McMillan 8-9 are 7.0 and stay clean.
-    run(settings, archive_uri, load("flatline"), hour(8), hour(10))
+    assert before == {h: ["flatline"] for h in (10, 11, 12, 13)}
+    # The next window's lookback holds only 12-13 of that flatline, too short on its own to
+    # flag; being context, those hours are not rewritten and keep their flags.
+    run(settings, archive_uri, load("flatline"), hour(14), hour(16))
     after = flags_by_hour(read_observations(archive_uri), "airnow:840110010043")
-    assert after == {
-        8: [],
-        9: [],
-        10: ["flatline"],
-        11: ["flatline"],
-        12: ["flatline"],
-        13: ["flatline"],
-    }
+    assert after == {**before, 15: []}
+
+
+# @spec AN-RUN-003
+def test_a_site_seen_only_in_the_lookback_is_not_written(settings, archive_uri):
+    rows = load("clean")
+    rows.append(row(UTC="2026-09-20T09:00", FullAQSCode="110010099", IntlAQSCode=None))
+    summary, sites, observations, _ = run(settings, archive_uri, rows, hour(10), hour(14))
+    assert "airnow:840110010099" not in sites.index
+    assert observations["observed_at"].min() == hour(10)
+    assert summary.context == 5
 
 
 # --- Run ----------------------------------------------------------------------
@@ -160,7 +167,7 @@ def test_lookback_hours_are_written_with_their_new_flags(settings, archive_uri):
 def test_entry_point_runs_end_to_end(settings, archive_uri):
     summary, sites, observations, _ = run(settings, archive_uri, load("clean"), hour(10), hour(14))
     assert len(sites) == 2
-    assert len(observations) == 12
+    assert len(observations) == 8  # hours 10-13 of two sites; 8-9 were lookback context
     assert set(observations["site_id"]) == set(sites.index)
 
 
@@ -231,15 +238,16 @@ def test_summary(settings, archive_uri):
     assert summary.source == Source.airnow
     assert summary.fetched == 9
     assert summary.rejected == {}
-    assert summary.written == 9
-    assert summary.flagged == {QcFlag.flatline: 6}
+    assert summary.written == 5
+    assert summary.context == 4
+    assert summary.flagged == {QcFlag.flatline: 4}
     assert summary.partitions == [
         f"{archive_uri}/source=airnow/sites.parquet",
         f"{archive_uri}/source=airnow/date=2026-09-20/observations.parquet",
     ]
     assert summary.window_start == hour(13) and summary.window_end == hour(16)
     assert summary.snapshot_at is None
-    assert summary.fetched == summary.written + sum(summary.rejected.values())
+    assert summary.fetched == summary.written + summary.context + sum(summary.rejected.values())
 
 
 # @spec AN-RUN-007
@@ -247,7 +255,7 @@ def test_summary_counts_unresolved_sites(settings, archive_uri):
     summary, sites, observations, _ = run(
         settings, archive_uri, load("malformed_codes"), hour(12), hour(13)
     )
-    assert summary.fetched == summary.written == 8
+    assert summary.fetched == summary.written == 8 and summary.context == 0
     assert summary.flagged == {QcFlag.site_id_unresolved: 3}
     unresolved = observations[observations["site_id"].str.startswith("airnow:unresolved:")]
     assert all(flags == ["site_id_unresolved"] for flags in unresolved["qc_flags"])

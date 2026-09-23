@@ -62,6 +62,7 @@ def summary() -> IngestSummary:
         fetched=3,
         rejected={"latitude": 1},
         written=2,
+        context=0,
         flagged={QcFlag.out_of_range: 1},
         partitions=[f"{ARCHIVE}/source=purpleair/sites.parquet"],
         snapshot_at=NOW_H,

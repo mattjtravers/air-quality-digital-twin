@@ -52,12 +52,13 @@ this segment is tested).
 - [x] **INFRA-DISP-014**: The dispatch stack shall set `GITHUB_REF` to `main`, and no schedule's `Input` shall carry a ref, so that every scheduled run executes the default branch's workflow definition and running another branch remains a deliberate manual act.
 - [x] **INFRA-DISP-015**: The dispatch function's request body shall carry `ref` and nothing else; it shall send no `inputs` object, so that every scheduled run resolves its own routine window rather than being handed bounds (`PIPE-SCHED-006`).
 - [x] **INFRA-DISP-016**: The dispatch function shall not attempt to detect or suppress a duplicate dispatch. Dispatch is at-least-once: a retry following a lost response may start a second workflow run over the same window, which the workflow's concurrency group queues (`PIPE-SCHED-004`) and which is harmless because every run is idempotent.
+- [x] **INFRA-DISP-017**: If GitHub answers `401`, then the error shall state that the token is invalid or expired and shall name the Secrets Manager secret it was read from, so that the fix — replacing that secret's value — is named in the message.
 
 ## Deployment and Operations
 
 - [x] **INFRA-OPS-001**: The project shall declare `aws-sam-cli` in the `dev` dependency group of `pyproject.toml`, so that `uv sync --all-groups` installs it and no devcontainer feature or separate install step is needed.
 - [x] **INFRA-OPS-002**: The repository shall contain `samconfig.toml` holding one config environment per stack, named `foundation` and `dispatch`.
-- [x] **INFRA-OPS-003**: Both config environments shall pin `region` explicitly rather than inheriting `AWS_DEFAULT_REGION`, and shall set `capabilities` to `CAPABILITY_IAM`.
+- [x] **INFRA-OPS-003**: Both config environments shall pin `region` explicitly rather than inheriting `AWS_DEFAULT_REGION`; the `dispatch` environment shall set `capabilities` to `CAPABILITY_IAM`, and the `foundation` environment to `CAPABILITY_IAM` and `CAPABILITY_NAMED_IAM`, because its runner role carries an explicit `RoleName`.
 - [x] **INFRA-OPS-004**: `samconfig.toml` shall contain no credential value; the GitHub token is referenced by the name of its Secrets Manager secret only.
 - [x] **INFRA-OPS-005**: The repository's `.gitignore` shall ignore `.aws-sam/`.
 - [x] **INFRA-OPS-006**: The repository shall contain `bin/schedules.sh` accepting `on`, `off`, and `status`, where `on` and `off` set the `State` of all four schedules and `status` prints each schedule's current state as reported by AWS.

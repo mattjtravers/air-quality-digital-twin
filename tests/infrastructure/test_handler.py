@@ -172,6 +172,20 @@ def test_a_404_names_every_cause_it_could_be(handler, secrets, calls):
     assert "token" in message or "access" in message
 
 
+# @spec INFRA-DISP-017
+def test_a_401_names_the_secret_to_replace(handler, secrets, calls):
+    _, answer = calls
+    answer["response"] = http_error(401)
+
+    with pytest.raises(Exception) as raised:
+        invoke(handler)
+
+    message = str(raised.value)
+    assert SECRET_NAME in message
+    assert "expired" in message
+    assert TOKEN not in message
+
+
 # @spec INFRA-DISP-009
 def test_a_403_tells_a_permission_failure_from_a_rate_limit(handler, secrets, calls):
     _, answer = calls

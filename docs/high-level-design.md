@@ -87,8 +87,8 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
 - The observation schema carries everything the calibration layer needs for distance-aware
   matching: WGS84 coordinates at full source precision, source identity, timestamp, humidity,
   raw PM2.5 per channel.
-- The pipeline runs unattended: scheduled runs keep the archive current with no manual step, and
-  a failed run is visible where the schedule lives.
+- The pipeline runs unattended: scheduled runs keep the archive current with no manual step; a
+  failed run is visible in GitHub Actions and a failed dispatch in CloudWatch.
 
 ## Non-Goals
 
@@ -198,8 +198,15 @@ corrections, and writes its products back through the store's primitives, so tha
 them and stays rebuildable from the archive alone.
 
 **Pipeline.** The one command-line entry point through which every run is invoked, the routine
-window each run covers when invoked on a schedule, and the schedules themselves. It owns no data;
-it decides *when* and *over what window* the other components execute.
+window each run covers when invoked on a schedule, the workflow each run executes in, and the
+cadence each scheduled run follows. It owns no data; it decides *when* and *over what window* the
+other components execute.
+
+**Infrastructure.** Every AWS resource the twin depends on, declared in templates in this
+repository: the archive bucket and the role runners assume, and the EventBridge schedules and
+dispatch Lambda that render the pipeline's cadences as `workflow_dispatch` calls. It owns no data
+and no pipeline logic; it owns the resources the other components need and how they come into
+being.
 
 **Fusion, transport, evaluation** — later increments, each a separate component following the
 calibration pattern: read from the archive, write products back through the store. Named here so
@@ -234,8 +241,8 @@ minimal environment exists only to trigger it.
 **Scheduled runs** execute on GitHub Actions runners: a workflow per run checks out the
 repository, installs it, and invokes the pipeline entry point against the S3 archive, whether
 invoked by a scheduled dispatch or a manual `workflow_dispatch` call. Runners have no PostGIS, so
-scheduled runs write the archive only. API keys, AWS credentials, and the archive URI are
-repository secrets.
+scheduled runs write the archive only. API keys and AWS credentials are repository secrets; the
+archive URI and AWS region are repository variables.
 
 **Scheduling** is driven by AWS EventBridge Scheduler, one schedule per routine cadence, each
 invoking a small Lambda that calls GitHub's `workflow_dispatch` API for the corresponding
@@ -399,8 +406,8 @@ monitors, reported against FAIRMODE model-quality objectives.
 
 - PurpleAir API v1 — `https://api.purpleair.com/v1/sensors` (bounding-box query via
   `nwlng`/`nwlat`/`selng`/`selat`; `X-API-Key` header).
-- EPA AirNow API — `https://www.airnowapi.org/aq/data/` (`BBOX`, `dataType=A` hourly averages;
-  data labeled preliminary/unvalidated).
+- EPA AirNow API — `https://www.airnowapi.org/aq/data/` (`BBOX`, `dataType=B` hourly
+  concentrations and AQI; data labeled preliminary/unvalidated).
 - Barkjohn, K. K., Gantt, B., and Clements, A. L. (2021). *Development and application of a United
   States-wide correction for PM2.5 data collected with PurpleAir sensors.* Atmospheric Measurement
   Techniques, 14, 4617–4637.
