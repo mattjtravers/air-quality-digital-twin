@@ -24,6 +24,7 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 - [x] **PIPE-CLI-010**: When a sub-command is invoked, the pipeline shall construct only the settings that sub-command needs, so that a missing `PURPLEAIR_API_KEY` does not prevent `aqdt ingest airnow`, `aqdt calibrate fit`, or `aqdt calibrate apply` from running.
 - [x] **PIPE-CLI-011**: When `--start` is given without `--end`, `--end` without `--start`, `--hours` together with either, or `--hours` with a non-positive value, the pipeline shall reject the invocation as a usage error before resolving a window.
 - [x] **PIPE-CLI-012**: When a timestamp option (`--start`, `--end`, `--as-of`) is given, the pipeline shall parse it as ISO 8601 and treat a value without a UTC offset as UTC.
+- [x] **PIPE-CLI-013**: When configuring logging, the pipeline shall set the `httpx` and `httpcore` loggers to `WARNING` whatever `--log-level` is given, so that no request URL is logged — AirNow authenticates with an `API_KEY` query parameter, and those libraries log every request URL at `INFO` and below.
 
 ## Routine Windows
 

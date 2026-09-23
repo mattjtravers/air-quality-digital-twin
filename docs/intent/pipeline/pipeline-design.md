@@ -66,7 +66,11 @@ archived while it was idle.
 **Output.** Each run prints one JSON object to stdout on completion — an ingester's
 `IngestSummary`, a fit run's count of fits by status, an apply run's row count and window — so
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
-`logging` at `--log-level`, including the resolved window before the run starts. A run that
+`logging` at `--log-level`, including the resolved window before the run starts. The HTTP
+client's own loggers (`httpx`, `httpcore`) stay at `WARNING` at every level: they log each
+request URL, and an AirNow URL carries the API key as a query parameter. GitHub masks repository
+secrets in workflow logs, but a run in the Codespace or anywhere else would print the key in
+full. A run that
 raises exits non-zero with the exception; nothing is retried at this level (the HTTP clients
 retry requests; the schedule's next occurrence retries the run). A run whose archive write
 succeeds but whose PostGIS load fails also exits non-zero: the archive is intact and the next
@@ -179,6 +183,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | Concurrency groups | One per workflow | A group only saves duplicated work; correctness is the store's. Sharing a group across workflows would let a queued run of one be superseded by a run of the other — a daily fit replaced by an hourly apply — and the lost run's work would not be covered. |
 | Cadence: PurpleAir 15 min | 15 minutes | Four snapshots an hour comfortably samples each hour, without multiplying runner use and API points for a consumer that needs neither, and without risking an hour with a single snapshot when a run is late. |
 | Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
+| HTTP client logging | `httpx` and `httpcore` pinned at `WARNING` | A request URL can carry a credential (AirNow's `API_KEY`), and a key in a log is a key disclosed. Retries and failures still surface through the clients' own errors and the run's exit status; nothing a run's log needs is lost. |
 | Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |
 | Retries | None at the CLI | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |
 | Activation | No job-level gate; scheduled runs are enabled and disabled through the EventBridge schedules' own state | Once every run arrives as a `workflow_dispatch` event, a condition on the event type cannot tell a scheduled run from a hand-started one. Turning runs off at their source creates no workflow run to skip and leaves manual dispatch working throughout a maintenance window. |

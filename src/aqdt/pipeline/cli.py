@@ -109,7 +109,7 @@ class _StderrHandler(logging.StreamHandler):
         pass
 
 
-# @spec PIPE-CLI-009
+# @spec PIPE-CLI-009, PIPE-CLI-013
 def _configure_logging(level: str) -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level))
@@ -117,6 +117,9 @@ def _configure_logging(level: str) -> None:
         handler = _StderrHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         root.addHandler(handler)
+    # The HTTP client logs every request URL, and an AirNow URL carries the API key.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _iso(value: datetime) -> str:

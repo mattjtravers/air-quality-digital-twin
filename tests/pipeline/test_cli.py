@@ -129,6 +129,15 @@ def test_log_level_configures_logging(env, stubs):
     assert logging.getLogger().level == logging.INFO
 
 
+# @spec PIPE-CLI-013
+@pytest.mark.parametrize("level", ["DEBUG", "INFO"])
+def test_http_client_loggers_never_log_request_urls(env, stubs, level):
+    assert run(["--log-level", level, "ingest", "airnow"]) == 0
+    for name in ("httpx", "httpcore"):
+        logger = logging.getLogger(name)
+        assert not logger.isEnabledFor(logging.INFO), name
+
+
 # @spec PIPE-CLI-010
 def test_each_command_constructs_only_its_own_settings(env, stubs, monkeypatch):
     monkeypatch.delenv("PURPLEAIR_API_KEY")
