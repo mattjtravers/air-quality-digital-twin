@@ -117,6 +117,13 @@ enabled deliberately: a stack deploy is not a decision to start dispatching into
 schedule live the instant the template lands would fire before the token or the workflows are
 necessarily ready.
 
+The template's `DISABLED` applies on every deploy that touches a schedule, not only the first.
+`bin/schedules.sh` changes `State` outside CloudFormation, and a stack update re-sends each
+changed schedule's whole definition, template `State` included — so redeploying the dispatch
+stack with a change that reaches the schedules (their expressions, targets, or the function they
+invoke) turns them off. After any dispatch-stack deploy, `bin/schedules.sh status` says whether
+they are still on, and `on` restores them.
+
 A schedule's `State` is also how scheduled runs are turned off and on for a maintenance window.
 Disabling the four schedules stops the dispatch at its source: no Lambda invocation, no workflow
 run, nothing to skip. Manual `workflow_dispatch` runs are unaffected, so a backfill or a
@@ -149,12 +156,16 @@ one that does clear means a run dispatched hours after the window it was meant f
 retries cover a transient GitHub error; beyond that the next occurrence is the retry, exactly as
 it is for a failed run.
 
-**Lambda.** `aqdt-dispatch`, Python 3.13, handler `handler.lambda_handler`, `CodeUri`
-`infra/dispatch/app/`.
+**Lambda.** One function serves all four schedules, each naming its workflow in the input.
+Its name is `${AWS::StackName}-dispatch` — `aqdt-dispatch-dispatch` for the `aqdt-dispatch`
+stack — and its log group (`/aws/lambda/aqdt-dispatch-dispatch`) and alarm
+(`aqdt-dispatch-dispatch-errors`) derive from the same expression. Python 3.13, handler
+`handler.lambda_handler`, `CodeUri` `infra/dispatch/app/`. The name is a replacement property:
+changing it creates a new function and a new log group, and repoints every schedule.
 
 The function has no dependencies to install: `boto3` is present in the Lambda runtime and
-`urllib.request` issues the POST, so `sam build` copies one file and the deployment package stays
-a few kilobytes. It lives outside `src/aqdt/` deliberately — `CodeUri` bundles what it points at,
+`urllib.request` issues the POST, so the deployment package is one file of a few kilobytes and
+`sam deploy` packages it with no build step. It lives outside `src/aqdt/` deliberately — `CodeUri` bundles what it points at,
 and the pipeline package pulls in GeoPandas, Pandera, and PyArrow, none of which a dispatcher
 needs.
 
@@ -305,6 +316,9 @@ it:
 3. Deploy the dispatch stack. Its schedules arrive `DISABLED`.
 4. Enable the schedules once a manual `workflow_dispatch` run has been seen to succeed against the
    archive.
+
+Any later dispatch-stack deploy ends with `bin/schedules.sh status`, and `on` if the deploy
+disabled them (§ Dispatch stack, State).
 
 ### Rollback and teardown
 
