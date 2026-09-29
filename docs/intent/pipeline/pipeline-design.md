@@ -101,13 +101,16 @@ EventBridge schedule dispatched it or a person did.
 
 | Workflow | Cadence (UTC) | Command | Concurrency group |
 |---|---|---|---|
-| `ingest-purpleair.yaml` | every 15 minutes | `aqdt ingest purpleair` | `ingest-purpleair` |
+| `ingest-purpleair.yaml` | hourly at :30 | `aqdt ingest purpleair` | `ingest-purpleair` |
 | `ingest-airnow.yaml` | hourly at :20 | `aqdt ingest airnow` | `ingest-airnow` |
 | `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate-fit` |
 | `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate-apply` |
 
-Cadence rationale: PurpleAir every 15 minutes gives about four snapshots per sensor-hour, enough
-for hourly aggregation (which imposes no minimum) at 96 requests a day. AirNow at 20 past the
+Cadence rationale: PurpleAir takes one snapshot per sensor-hour, matching the hourly step every
+consumer works at, at 24 metered requests a day; hourly aggregation imposes no minimum snapshot
+count. The snapshot is taken at :30 because the mid-hour reading is the best single estimate of
+the hourly mean and sits furthest from both hour boundaries, so a late run still lands in its own
+hour. AirNow at 20 past the
 hour leaves the feed time to publish the hour just ended. Fit at 00:30 runs once the day's last
 AirNow hour is archived; apply at :40 follows both ingesters each hour and, on the first hour of
 the day, the new fit.
@@ -181,7 +184,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | Trigger | AWS EventBridge Scheduler → dispatch Lambda → `workflow_dispatch`, one workflow per run | Per-run workflows keep each run's command, secrets, and concurrency group readable in one file. The HLD records why scheduling is external to GitHub Actions. |
 | Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | The invariant must hold for every caller — a hand-run command, a dispatch backfill, a future orchestrator — so it is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
 | Concurrency groups | One per workflow | A group only saves duplicated work; correctness is the store's. Sharing a group across workflows would let a queued run of one be superseded by a run of the other — a daily fit replaced by an hourly apply — and the lost run's work would not be covered. |
-| Cadence: PurpleAir 15 min | 15 minutes | Four snapshots an hour comfortably samples each hour, without multiplying runner use and API points for a consumer that needs neither, and without risking an hour with a single snapshot when a run is late. |
+| Cadence: PurpleAir hourly | Hourly at :30 | PurpleAir's API is metered per field per sensor returned, so each snapshot is a cost; one per hour is what the hourly calibration, fusion, and transport steps consume. Mid-hour is the best single-sample estimate of the hourly mean and keeps a late run inside its hour. A missed run leaves that sensor-hour empty, which downstream stages treat as any other gap. |
 | Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
 | HTTP client logging | `httpx` and `httpcore` pinned at `WARNING` | A request URL can carry a credential (AirNow's `API_KEY`), and a key in a log is a key disclosed. Retries and failures still surface through the clients' own errors and the run's exit status; nothing a run's log needs is lost. |
 | Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |

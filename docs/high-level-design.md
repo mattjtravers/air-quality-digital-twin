@@ -89,6 +89,9 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
   raw PM2.5 per channel.
 - The pipeline runs unattended: scheduled runs keep the archive current with no manual step; a
   failed run is visible in GitHub Actions and a failed dispatch in CloudWatch.
+- API consumption is a designed quantity: a metered source's per-run cost follows from the fields
+  requested, the sensors returned, and the cadence, each of which is chosen deliberately; an
+  exhausted allowance fails the run without retry.
 
 ## Non-Goals
 
@@ -99,8 +102,9 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
 - **No background / boundary PM2.5.** Nothing represents PM2.5 entering the domain from outside it
   (no equivalent of CAMS). This is a known limitation of the fused surface.
 - **No resident real-time service.** "Real-time" means the latest available observations as of the
-  most recent scheduled or on-demand run, not a continuously polling daemon. PurpleAir's ~2-minute
-  native cadence is not captured continuously.
+  most recent scheduled or on-demand run, not a continuously polling daemon. PurpleAir is sampled
+  once an hour, at the model's time step, not at its ~2-minute native cadence; sub-hourly structure
+  (short plumes, within-hour variability) is not captured.
 - **No workflow orchestrator yet.** Scheduled runs are dispatched directly and wrapped by nothing;
   Dagster is the intended target once backfills and lineage across a running pipeline are needed.
 - **No gridded data in PostGIS.** HRRR and any derived surfaces are stored as CF-convention
@@ -182,7 +186,9 @@ flowchart LR
 
 **Source ingesters** (one per external source). Each owns everything specific to its source: API
 client and authentication, bounding-box query, parsing the source's native payload, the source's
-domain-standard QC rules, and mapping to the canonical observation schema. Rules that exist because
+domain-standard QC rules, mapping to the canonical observation schema, and the source's usage
+cost — for a metered API, which fields it requests and how it fails when the allowance is
+exhausted (see Key Design Decisions: Metered sources). Rules that exist because
 of one source's quirks live with that source. Current ingesters: `purpleair-ingest`,
 `airnow-ingest`.
 
@@ -220,12 +226,14 @@ endpoint returns each sensor's latest reading only, so a run captures a snapshot
 for PurpleAir accumulates through repeated runs, and snapshot polls that return an unchanged reading
 (same sensor, same `last_seen`) do not create duplicate observations.
 
-On a schedule, each run covers a routine window that needs no argument: PurpleAir polls a snapshot
-several times an hour; AirNow re-fetches a trailing window at least as long as the period the
-feed keeps revising; calibration refits once a day and re-applies over a trailing window each
-hour. Because every run is idempotent and windows overlap their predecessors, a missed or delayed
-scheduled run costs nothing but latency — the next run covers the gap. Any window can also be
-requested explicitly for backfill.
+On a schedule, each run covers a routine window that needs no argument: PurpleAir takes one
+snapshot at the middle of each hour; AirNow re-fetches a trailing window at least as long as the
+period the feed keeps revising; calibration refits once a day and re-applies over a trailing window
+each hour. Because every run is idempotent and windows overlap their predecessors, a missed or
+delayed AirNow or calibration run costs nothing but latency — the next run covers the gap. Any
+window can also be requested explicitly for backfill. PurpleAir is the exception: the snapshot
+endpoint has no history, so a missed PurpleAir run is a sensor-hour with no observation, which
+calibration and fusion treat as a gap like any other missing reading.
 
 History serves two distinct needs with different depth requirements. Fitting calibration models and
 evaluating the fused surface need a deep archive, built up during an initial polling period.
@@ -289,17 +297,19 @@ public repository, and put every run's log beside the code.
 
 The trigger is separate from the executor, because GitHub Actions' own `schedule:` cron trigger is
 not dependable enough to keep the archive current — it drops most occurrences outright rather than
-running them late, leaving multi-hour gaps at a nominal 15-minute cadence. AWS EventBridge
-Scheduler, a managed cron that fires to the minute, holds one schedule per routine cadence
-(PurpleAir every 15 minutes, AirNow and calibrate-apply hourly, calibrate-fit daily) and invokes a
+running them late, leaving multi-hour gaps in the schedule. AWS EventBridge Scheduler, a managed
+cron that fires to the minute, holds one schedule per routine cadence (PurpleAir, AirNow, and
+calibrate-apply hourly, calibrate-fit daily) and invokes a
 small Lambda that calls GitHub's `workflow_dispatch` REST API for the matching workflow.
 `workflow_dispatch` is the only trigger the workflows declare, so there is exactly one scheduled
 path and it is the reliable one.
 
-Timing precision beyond this is unnecessary: no consumer needs PurpleAir's two-minute native
-cadence, since calibration aggregates PurpleAir to hours and imposes no minimum snapshot count, so
-a few snapshots per hour suffice, and every run's window overlaps its predecessor so a late or
-missed run is recovered by the next. Concurrent runs are safe from any trigger because the archive
+Every consumer works at an hourly time step — AirNow reports hourly, calibration pairs sensors
+with monitors by the hour, and the fused surface and HRRR transport fields are hourly — so
+PurpleAir is sampled once an hour and no consumer needs its two-minute native cadence. The
+snapshot is taken at the middle of the hour: for a concentration varying smoothly across the hour,
+the mid-hour reading is the best single estimate of the hourly mean, and it sits furthest from both
+hour boundaries, so a late run still lands in its own hour. Concurrent runs are safe from any trigger because the archive
 itself guarantees one writer per partition (the store's writes are compare-and-swap: a partition
 changed under a writer is re-read and re-merged, never overwritten); concurrency groups serialize
 each workflow with itself only so that two runs over the same window do not both spend runner
@@ -307,6 +317,27 @@ minutes.
 
 A workflow orchestrator (Dagster) is the intended eventual wrapper, sitting on the same entry
 points, once backfills and lineage across a running pipeline are needed.
+
+### Metered sources: API cost is a design input
+
+PurpleAir's API is metered. Every call is charged in points: a small per-call base cost plus the
+summed cost of the requested fields, multiplied by the number of sensor rows returned. A run's cost
+is therefore the product of three choices — the field list, the bounding box, and the cadence — and
+the pipeline's consumption rate is set by design, not discovered on the bill. AirNow is not
+metered; its constraint is a per-key request rate, far above the pipeline's hourly use.
+
+Three rules follow, each owned by the metered source's ingester:
+
+- **Request only what a consumer reads.** Every requested field has a named downstream use —
+  canonical schema, QC, correction, or calibration. A field is added when a consumer needs it and
+  its cost is recorded with the decision; it is not fetched speculatively.
+- **Sample at the model's time step.** Cadence is set by the hourly step every consumer works at
+  (see Execution model), not by the source's native rate.
+- **Exhaustion fails fast.** An out-of-allowance response (HTTP 402) is not retried — no retry
+  within the run can succeed — and fails the run with its status, visible in the run log.
+
+The test suite never calls a metered API: clients are exercised through mock transports, so CI and
+local test runs consume nothing.
 
 ### Persistence: GeoParquet archive as system of record, PostGIS as serving layer
 
@@ -390,6 +421,7 @@ only; its raster support is a poor fit for time-stepped model output.
 - Every AirNow site record has a normalized identifier; every AirNow flatline (a run of identical
   values over several consecutive hours) carries the flatline flag.
 - Every archived observation can be traced to the raw payload fields it came from.
+- An exhausted PurpleAir allowance produces a failed run on its first request, with no retries.
 
 **Falsification signals:**
 

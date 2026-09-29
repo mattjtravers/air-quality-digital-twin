@@ -93,7 +93,7 @@ Resources:
       Name: aqdt-ingest-purpleair
       Description: PurpleAir snapshot ingest, four times an hour.
       State: DISABLED
-      ScheduleExpression: cron(0/15 * * * ? *)
+      ScheduleExpression: cron(30 * * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"

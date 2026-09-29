@@ -27,7 +27,7 @@ this segment is tested).
 ## EventBridge Schedules
 
 - [x] **INFRA-SCHED-001**: The dispatch stack shall declare exactly four EventBridge schedules, named `aqdt-ingest-purpleair`, `aqdt-ingest-airnow`, `aqdt-calibrate-fit`, and `aqdt-calibrate-apply`.
-- [x] **INFRA-SCHED-002**: The schedules' expressions shall be `cron(0/15 * * * ? *)` (PurpleAir), `cron(20 * * * ? *)` (AirNow), `cron(30 0 * * ? *)` (fit), and `cron(40 * * * ? *)` (apply), each with a schedule timezone of UTC, rendering the cadences the pipeline segment specifies.
+- [x] **INFRA-SCHED-002**: The schedules' expressions shall be `cron(30 * * * ? *)` (PurpleAir), `cron(20 * * * ? *)` (AirNow), `cron(30 0 * * ? *)` (fit), and `cron(40 * * * ? *)` (apply), each with a schedule timezone of UTC, rendering the cadences the pipeline segment specifies.
 - [x] **INFRA-SCHED-003**: Every schedule shall set `FlexibleTimeWindow` mode to `OFF`, so that each fires at its stated minute rather than within a jitter window.
 - [x] **INFRA-SCHED-004**: Every schedule shall be created with `State: DISABLED`, so that deploying the dispatch stack does not itself begin dispatching runs.
 - [x] **INFRA-SCHED-005**: Every schedule shall set `MaximumRetryAttempts` to 2 and `MaximumEventAgeInSeconds` to 300, in place of the service defaults of 185 attempts over 24 hours.
