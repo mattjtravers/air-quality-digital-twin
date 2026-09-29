@@ -19,9 +19,9 @@ later phase.
 
 ## How it works
 
-- **Ingestion.** PurpleAir is pulled every 15 minutes; AirNow is pulled
-  hourly. Both are quality-checked and written to a partitioned GeoParquet
-  archive in S3, the system of record.
+- **Ingestion.** PurpleAir and AirNow are both pulled hourly, matching the
+  model's hourly time step. Both are quality-checked and written to a
+  partitioned GeoParquet archive in S3, the system of record.
 - **Calibration.** Each PurpleAir sensor is matched to its nearest AirNow
   monitor within a 10 km radius (UTM 18N / EPSG:26918). A per-sensor OLS
   regression against that monitor is accepted once it has at least 72
