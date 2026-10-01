@@ -47,6 +47,20 @@ Archive tests use a temp directory or `moto`, so no AWS credentials are needed t
 The user makes every git commit. Leave changes uncommitted at the end of a task and say what is
 ready to commit; committing is the user's code-review step.
 
+Any change under `.github/workflows/` is verified on GitHub before the next scheduled dispatch,
+because the scheduled workflows run from `main` as soon as it lands and a broken workflow fails
+every run until fixed:
+
+1. Before pushing, confirm every `uses:` ref exists upstream
+   (`git ls-remote --tags https://github.com/<owner>/<action>`); some actions publish only full
+   version tags (e.g. `v10.2.0`) and no floating major tag (`v10`).
+2. After the push, confirm the CI run on the pushed commit succeeds.
+3. Dispatch `ingest-airnow` by hand (it is the cheapest run and spends no PurpleAir points) and
+   confirm it succeeds; it exercises the same setup steps as every scheduled workflow.
+
+`gh` is not installed in the Codespace; query runs through the GitHub REST API with
+`$GITHUB_TOKEN`.
+
 ## Commands
 
 This project uses `uv` for dependency and environment management.
