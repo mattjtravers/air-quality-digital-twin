@@ -127,8 +127,8 @@ infrastructure segment, as the cron expressions of the EventBridge schedules tha
 together with the switch that turns those schedules on and off (infrastructure LLD § Dispatch
 stack). Changing a cadence is a change there, argued from the reasoning here.
 
-Each workflow: checks out the repository, installs `uv` and the project (`uv sync --no-dev`),
-and runs the command. Every job has `timeout-minutes` under its cadence interval (PurpleAir 10,
+Each workflow runs on the `ubuntu-24.04` runner image, checks out the repository, installs
+`uv` and the project (`uv sync --no-dev`), and runs the command. Every job has `timeout-minutes` under its cadence interval (PurpleAir 10,
 AirNow 20, fit 30, apply 20, fuse 20) so a hung run cannot pile up behind itself. A dispatch names the ref
 it runs from, so a workflow change takes effect when it lands on `main`.
 
@@ -195,6 +195,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | Concurrency groups | One per workflow | A group only saves duplicated work; correctness is the store's. Sharing a group across workflows would let a queued run of one be superseded by a run of the other — a daily fit replaced by an hourly apply — and the lost run's work would not be covered. |
 | Cadence: PurpleAir hourly | Hourly at :30 | PurpleAir's API is metered per field per sensor returned, so each snapshot is a cost; one per hour is what the hourly calibration, fusion, and transport steps consume. Mid-hour is the best single-sample estimate of the hourly mean and keeps a late run inside its hour. A missed run leaves that sensor-hour empty, which downstream stages treat as any other gap. |
 | Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
+| Runner image | `ubuntu-24.04`, named explicitly | A floating `ubuntu-latest` changes operating system under a running pipeline on GitHub's schedule, not this project's; naming the image makes a change of OS a deliberate edit that is tested before it reaches the schedules. |
 | HTTP client logging | `httpx` and `httpcore` pinned at `WARNING` | A request URL can carry a credential (AirNow's `API_KEY`), and a key in a log is a key disclosed. Retries and failures still surface through the clients' own errors and the run's exit status; nothing a run's log needs is lost. |
 | Output | One JSON line per run on stdout | Machine-readable in logs, grep-able across runs, and parseable by a future orchestrator. |
 | Retries | None at the CLI | The clients already retry HTTP; a failed run should fail visibly and be retried by the next scheduled occurrence. |

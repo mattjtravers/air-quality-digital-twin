@@ -159,6 +159,13 @@ def test_no_workflow_gates_its_job(workflow):
     assert "AQDT_SCHEDULES_ENABLED" not in (WORKFLOWS / name).read_text(), name
 
 
+# @spec PIPE-SCHED-010
+def test_every_workflow_names_its_runner_image():
+    for path in sorted(WORKFLOWS.glob("*.yaml")):
+        for job in yaml.safe_load(path.read_text())["jobs"].values():
+            assert job["runs-on"] == "ubuntu-24.04", path.name
+
+
 # @spec PIPE-CFG-001
 def test_each_workflow_exposes_only_what_its_command_needs(workflow):
     name, wf, expected = workflow
