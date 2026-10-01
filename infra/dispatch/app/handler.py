@@ -33,6 +33,7 @@ ALLOWED_WORKFLOWS = frozenset(
         "ingest-airnow.yaml",
         "calibrate-fit.yaml",
         "calibrate-apply.yaml",
+        "fuse.yaml",
     }
 )
 

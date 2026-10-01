@@ -27,12 +27,13 @@ ARCHIVE_PREFIX = "dc-metro"
 GITHUB_OWNER = "mattjtravers"
 GITHUB_REPO = "air-quality-digital-twin"
 
-#: The four workflows the schedules dispatch, and the cadence each one fires on.
+#: The five workflows the schedules dispatch, and the cadence each one fires on.
 SCHEDULES = {
     "aqdt-ingest-purpleair": ("cron(30 * * * ? *)", "ingest-purpleair.yaml"),
     "aqdt-ingest-airnow": ("cron(20 * * * ? *)", "ingest-airnow.yaml"),
     "aqdt-calibrate-fit": ("cron(30 0 * * ? *)", "calibrate-fit.yaml"),
     "aqdt-calibrate-apply": ("cron(40 * * * ? *)", "calibrate-apply.yaml"),
+    "aqdt-fuse": ("cron(50 * * * ? *)", "fuse.yaml"),
 }
 
 

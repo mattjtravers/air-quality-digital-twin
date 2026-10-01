@@ -2,6 +2,7 @@
 
 ``write_partitioned`` / ``read_partitioned`` are the two primitives every product uses; the
 observation and site functions are thin wrappers over them with their ``Product`` definitions.
+``replace_object`` gives a whole object, such as a raster, the same write guarantees.
 """
 
 from __future__ import annotations
@@ -394,6 +395,77 @@ def read_partitioned(archive_uri: str | None, product: Product, **filters: Filte
     if product.has_geometry:
         combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=frames[0].crs)
     return product.frame_model.validate(combined)
+
+
+# --- guarded whole objects -------------------------------------------------------------------
+
+
+def _object_token(fs: fsspec.AbstractFileSystem, path: str) -> tuple[bool, str | None]:
+    """Whether the S3 object exists and, if so, the ETag a conditional request must present."""
+    fs.invalidate_cache(path)
+    bucket, key = path.split("/", 1)
+    try:
+        head = fs.call_s3("head_object", Bucket=bucket, Key=key)
+    except FileNotFoundError:
+        return False, None
+    return True, head["ETag"]
+
+
+def _delete_conditional(fs: fsspec.AbstractFileSystem, path: str, token: str) -> bool:
+    """Delete the S3 object only if it is unchanged since ``token`` was read; ``False`` when S3
+    refused because it changed."""
+    bucket, key = path.split("/", 1)
+    try:
+        fs.call_s3("delete_object", Bucket=bucket, Key=key, IfMatch=token)
+    except OSError as error:
+        if _is_precondition_failure(error):
+            return False
+        raise
+    finally:
+        fs.invalidate_cache(path)
+    return True
+
+
+# @spec OBS-ARCHIVE-027, OBS-ARCHIVE-028, OBS-ARCHIVE-029, OBS-ARCHIVE-030
+def replace_object(
+    archive_uri: str | None, key: str, produce: Callable[[], bytes | None]
+) -> str | None:
+    """Make ``{archive_uri}/{key}`` hold what ``produce()`` returns, or not exist for ``None``.
+
+    The object's token is read before ``produce`` is called, and the write or delete is
+    conditional on it, so a caller that reads its inputs inside ``produce`` can never put back an
+    older version over one another writer landed in between: a refusal re-reads the token and
+    calls ``produce`` again, up to ``MAX_WRITE_ATTEMPTS`` times. Locally the partition lock is
+    held across ``produce`` and the rename instead. Returns the object's URI, or ``None`` when it
+    ends absent.
+    """
+    archive_uri = resolve_archive_uri(archive_uri)
+    fs, root = _filesystem(archive_uri)
+    path = _join(root, key)
+    uri = _join(archive_uri, key)
+    if isinstance(fs, LocalFileSystem):
+        with _partition_lock(fs, path):
+            data = produce()
+            if data is None:
+                if os.path.exists(path):
+                    os.remove(path)
+                return None
+            _write_atomic(fs, path, data, None)
+            return uri
+    for attempt in range(1, MAX_WRITE_ATTEMPTS + 1):
+        exists, token = _object_token(fs, path)
+        data = produce()
+        if data is None:
+            if not exists:
+                return None
+            if _delete_conditional(fs, path, token):
+                return None
+        elif _write_atomic(fs, path, data, token):
+            return uri
+        log.info("object changed under writer (attempt %d): %s", attempt, path)
+    raise ConcurrentWriteError(
+        f"object {path} changed under this writer on every one of {MAX_WRITE_ATTEMPTS} attempts"
+    )
 
 
 # --- observation and site wrappers ---------------------------------------------------------

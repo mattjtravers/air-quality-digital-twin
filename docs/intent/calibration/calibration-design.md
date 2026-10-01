@@ -104,7 +104,8 @@ fitted" from "fitted and found uncalibrated"). There is no cap on how old that f
 fit archive is served by the last fit before it, and `fit_as_of` on the row is how a consumer
 sees that.
 
-Reference monitors are not calibrated; the fusion layer takes their `pm25_raw` directly.
+Reference monitors are not calibrated; a downstream layer that uses them takes their `pm25_raw`
+directly.
 
 ## Runs
 

@@ -14,6 +14,7 @@ SCHEDULES=(
     aqdt-ingest-airnow
     aqdt-calibrate-fit
     aqdt-calibrate-apply
+    aqdt-fuse
 )
 
 usage() {

@@ -8,7 +8,8 @@ prefix: PIPE
 ## Context and Design Philosophy
 
 Every component of the twin exposes its run as a Python function of *(archive, window,
-settings)*: `ingest_purpleair`, `ingest_airnow`, `fit_calibrations`, `apply_calibrations`.
+settings)*: `ingest_purpleair`, `ingest_airnow`, `fit_calibrations`, `apply_calibrations`,
+`krige_surfaces`.
 Nothing in those components knows what time it is, where it is running, or how often it should
 run — that is what keeps them pure and their archives deterministic. This component is the one
 place those questions are answered. It owns the command-line entry point through which every run
@@ -41,6 +42,7 @@ sub-command per run plus the serving-layer maintenance commands:
 | `aqdt ingest airnow [--start T --end T \| --hours N]` | `ingest_airnow` | trailing 48 h: `[now_h − 48 h, now_h)` |
 | `aqdt calibrate fit [--as-of T]` | `fit_calibrations` | the most recent 00:00 UTC at or before now |
 | `aqdt calibrate apply [--start T --end T \| --hours N]` | `apply_calibrations` | trailing 48 h: `[now_h − 48 h, now_h)` |
+| `aqdt fuse [--start T --end T \| --hours N]` | `krige_surfaces` | trailing 3 h: `[now_h − 3 h, now_h)` |
 | `aqdt db schema` | `apply_schema` | — |
 | `aqdt db rebuild` | `rebuild` | — |
 
@@ -64,7 +66,8 @@ and never close it. `aqdt db rebuild` is how a Codespace catches up with what th
 archived while it was idle.
 
 **Output.** Each run prints one JSON object to stdout on completion — an ingester's
-`IngestSummary`, a fit run's count of fits by status, an apply run's row count and window — so
+`IngestSummary`, a fit run's count of fits by status, an apply run's row count and window, a
+fuse run's window and count of surfaces by status — so
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
 `logging` at `--log-level`, including the resolved window before the run starts. The HTTP
 client's own loggers (`httpx`, `httpcore`) stay at `WARNING` at every level: they log each
@@ -90,6 +93,7 @@ require `PURPLEAIR_API_KEY`. Missing configuration fails before any request is m
 |---|---|
 | AirNow: trailing 48 h | AirNow re-issues the preceding 48 hours on every hourly update, so a 48 h window collects every revision of preliminary data (AirNow LLD § Run). |
 | Apply: trailing 48 h | Re-applies the hours whose sensor aggregates were still accumulating on the previous run, and repairs any hours calibrated with a stale fit because the daily fit ran late or was skipped. 48 h covers one missed daily fit with margin. |
+| Fuse: trailing 3 h | A surface is only as fresh as the calibrated hour beneath it, and an hour's calibrated values are settled once apply has run after its snapshot. Three hours re-kriges the latest hour and covers a missed or late fuse or apply run twice over, while keeping a run to three surfaces so the grid resolution, not the window, sets the run time. A gap longer than that — a late daily fit repaired by apply's 48 h window — is refreshed by an explicit backfill window. |
 | Fit: most recent 00:00 UTC | Refits are daily (calibration LLD § Runs). Keying on midnight rather than "now" makes the run idempotent within the day: however late the schedule fires, the same `as_of` is refit and the same partition replaced. |
 
 ## Workflows and Cadence
@@ -105,6 +109,7 @@ EventBridge schedule dispatched it or a person did.
 | `ingest-airnow.yaml` | hourly at :20 | `aqdt ingest airnow` | `ingest-airnow` |
 | `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate-fit` |
 | `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate-apply` |
+| `fuse.yaml` | hourly at :50 | `aqdt fuse` | `fuse` |
 
 Cadence rationale: PurpleAir takes one snapshot per sensor-hour, matching the hourly step every
 consumer works at, at 24 metered requests a day; hourly aggregation imposes no minimum snapshot
@@ -113,7 +118,9 @@ the hourly mean and sits furthest from both hour boundaries, so a late run still
 hour. AirNow at 20 past the
 hour leaves the feed time to publish the hour just ended. Fit at 00:30 runs once the day's last
 AirNow hour is archived; apply at :40 follows both ingesters each hour and, on the first hour of
-the day, the new fit.
+the day, the new fit; fuse at :50 follows apply, so the hour just ended is kriged from its
+calibrated values. An apply still running at :50 leaves fuse an hour without calibrated rows,
+recorded as having too few points; the next two fuse runs cover that hour again.
 
 The rationale above is this component's; the cadences themselves are specified once, in the
 infrastructure segment, as the cron expressions of the EventBridge schedules that realize them —
@@ -122,7 +129,7 @@ stack). Changing a cadence is a change there, argued from the reasoning here.
 
 Each workflow: checks out the repository, installs `uv` and the project (`uv sync --no-dev`),
 and runs the command. Every job has `timeout-minutes` under its cadence interval (PurpleAir 10,
-AirNow 20, fit 30, apply 20) so a hung run cannot pile up behind itself. A dispatch names the ref
+AirNow 20, fit 30, apply 20, fuse 20) so a hung run cannot pile up behind itself. A dispatch names the ref
 it runs from, so a workflow change takes effect when it lands on `main`.
 
 **Concurrency.** Correctness under concurrent writers is the observation store's: its partition
@@ -168,6 +175,7 @@ src/aqdt/
   ingest-airnow.yaml
   calibrate-fit.yaml
   calibrate-apply.yaml
+  fuse.yaml
 tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workflow files
 ```
 
@@ -175,10 +183,11 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 
 | Decision | Chosen | Rationale |
 |----------|--------|-----------|
-| CLI library | `argparse` (standard library) | Six sub-commands with a handful of options; the standard library covers them with no dependency version to track. |
+| CLI library | `argparse` (standard library) | Seven sub-commands with a handful of options; the standard library covers them with no dependency version to track. |
 | Entry point | Console script `aqdt` plus `python -m aqdt` | One name for every trigger to invoke; `-m` costs one file and helps when the script is not on `PATH`. |
 | Where the clock enters | Only in resolving a routine window in the CLI | Keeps every component a pure function of explicit bounds and puts the one clock read where it is logged and testable. |
-| Trailing window length | 48 h for AirNow and apply | 48 h is AirNow's own revision horizon and covers a missed daily fit for apply, and it needs no record of the last run — state the pipeline deliberately keeps none of. |
+| Trailing window length | 48 h for AirNow and apply; 3 h for fuse | 48 h is AirNow's own revision horizon and covers a missed daily fit for apply. Fuse's cost per hour is a kriged surface, so its window is the shortest that still covers a missed run; 3 h does that twice over. None needs a record of the last run — state the pipeline deliberately keeps none of. |
+| Fuse command name | `aqdt fuse`, one command | Matches the verb-led `ingest` and `calibrate` commands; the kriging method is fusion's internal choice, so a later regression-kriging version is the same command. |
 | Fit `as_of` | Most recent 00:00 UTC | Daily refits keyed on midnight are idempotent within the day and produce a readable fit history; calibration accepts any hour for backfill. |
 | PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | The environment already says whether a serving layer exists; a developer's Codespace run refreshes it without remembering a flag, and runners have none to load. |
 | Trigger | AWS EventBridge Scheduler → dispatch Lambda → `workflow_dispatch`, one workflow per run | Per-run workflows keep each run's command, secrets, and concurrency group readable in one file. The HLD records why scheduling is external to GitHub Actions. |
@@ -195,16 +204,14 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 ## Open Questions & Future Decisions
 
 1. Runner minutes: the cadences assume a public repository (unlimited minutes). On a private
-   repository the PurpleAir cadence alone would exceed the free tier; reduce cadence or move
+   repository the hourly runs together would exceed the free tier; reduce cadence or move
    execution off GitHub Actions.
-2. PurpleAir API points: 96 snapshots a day over ~100 sensors and 9 fields is a measurable share
-   of a free-tier points budget; confirm against the account's allocation after the first week.
-3. Whether `workflow_dispatch` backfills should also accept a `--hours` input; start with
+2. Whether `workflow_dispatch` backfills should also accept a `--hours` input; start with
    explicit bounds only.
-4. Whether a Codespace should run `aqdt db rebuild` on resume as well as on create; today a
+3. Whether a Codespace should run `aqdt db rebuild` on resume as well as on create; today a
    developer runs it by hand.
-5. Adopting the infrastructure segment's OIDC runner role, which is scoped to the archive prefix,
-   in place of the long-lived access keys. It changes `PIPE-CFG-001` and all four workflows (an
+4. Adopting the infrastructure segment's OIDC runner role, which is scoped to the archive prefix,
+   in place of the long-lived access keys. It changes `PIPE-CFG-001` and every run workflow (an
    `id-token: write` permission and a credentials step in place of the key secrets).
 
 ## References
@@ -213,6 +220,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 - `docs/intent/airnow-ingest/airnow-ingest-design.md` § Run — the 48-hour revision horizon.
 - `docs/intent/calibration/calibration-design.md` § Runs — daily refit cadence; both runs write
   `sensor_hourly`.
+- `docs/intent/fusion/fusion-design.md` § Runs — `krige_surfaces`, one surface per hour.
 - `docs/intent/observation-store/observation-store-design.md` — single writer per partition;
   `load_partitions`, `rebuild`, `DATABASE_URL`, `AQDT_ARCHIVE_URI`.
 - `docs/intent/infrastructure/infrastructure-design.md` — the EventBridge schedules that render

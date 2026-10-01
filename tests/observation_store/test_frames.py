@@ -87,7 +87,7 @@ def _compatible(annotation, dtype: str) -> bool:
     if inner is float:
         return "float" in dtype
     if inner is int:
-        return "int" in dtype
+        return "int" in dtype.lower()  # numpy int64, or pandas' nullable Int64
     if inner is str or (isinstance(inner, type) and issubclass(inner, enum.Enum)):
         return dtype == "object" or dtype.startswith(("str", "string"))
     if inner is datetime.datetime:

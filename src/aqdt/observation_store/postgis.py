@@ -79,7 +79,7 @@ def _to_sql_value(value: Any) -> Any:
         return Jsonb(value)
     if isinstance(value, (list, tuple)) or hasattr(value, "tolist") and not isinstance(value, str):
         return [_to_sql_value(v) for v in (value.tolist() if hasattr(value, "tolist") else value)]
-    if value is pd.NaT or value is None:
+    if value is pd.NaT or value is pd.NA or value is None:
         return None
     return value
 

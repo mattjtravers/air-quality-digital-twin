@@ -39,7 +39,7 @@ def schedule(request, dispatch):
 
 
 # @spec INFRA-SCHED-001
-def test_exactly_four_schedules(dispatch):
+def test_exactly_five_schedules(dispatch):
     assert set(schedules_by_name(dispatch)) == set(SCHEDULES)
 
 

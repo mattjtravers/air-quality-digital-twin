@@ -26,8 +26,8 @@ this segment is tested).
 
 ## EventBridge Schedules
 
-- [x] **INFRA-SCHED-001**: The dispatch stack shall declare exactly four EventBridge schedules, named `aqdt-ingest-purpleair`, `aqdt-ingest-airnow`, `aqdt-calibrate-fit`, and `aqdt-calibrate-apply`.
-- [x] **INFRA-SCHED-002**: The schedules' expressions shall be `cron(30 * * * ? *)` (PurpleAir), `cron(20 * * * ? *)` (AirNow), `cron(30 0 * * ? *)` (fit), and `cron(40 * * * ? *)` (apply), each with a schedule timezone of UTC, rendering the cadences the pipeline segment specifies.
+- [x] **INFRA-SCHED-001**: The dispatch stack shall declare exactly five EventBridge schedules, named `aqdt-ingest-purpleair`, `aqdt-ingest-airnow`, `aqdt-calibrate-fit`, `aqdt-calibrate-apply`, and `aqdt-fuse`.
+- [x] **INFRA-SCHED-002**: The schedules' expressions shall be `cron(30 * * * ? *)` (PurpleAir), `cron(20 * * * ? *)` (AirNow), `cron(30 0 * * ? *)` (fit), `cron(40 * * * ? *)` (apply), and `cron(50 * * * ? *)` (fuse), each with a schedule timezone of UTC, rendering the cadences the pipeline segment specifies.
 - [x] **INFRA-SCHED-003**: Every schedule shall set `FlexibleTimeWindow` mode to `OFF`, so that each fires at its stated minute rather than within a jitter window.
 - [x] **INFRA-SCHED-004**: Every schedule shall be created with `State: DISABLED`, so that deploying the dispatch stack does not itself begin dispatching runs.
 - [x] **INFRA-SCHED-005**: Every schedule shall set `MaximumRetryAttempts` to 2 and `MaximumEventAgeInSeconds` to 300, in place of the service defaults of 185 attempts over 24 hours.
@@ -40,7 +40,7 @@ this segment is tested).
 - [x] **INFRA-DISP-002**: The dispatch function shall require no dependency beyond what the Lambda runtime provides, so that its deployment package is its own source only.
 - [x] **INFRA-DISP-003**: The dispatch function shall read the GitHub token from the Secrets Manager secret named by the environment variable `GITHUB_TOKEN_SECRET_NAME`, and shall never receive the token value through its environment or its invocation input.
 - [x] **INFRA-DISP-004**: When the dispatch function is invoked with an input naming an allowed workflow, it shall issue `POST https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{workflow}/dispatches` with the token as a bearer credential and a body of `{"ref": "{GITHUB_REF}"}`.
-- [x] **INFRA-DISP-005**: If the invocation input has no `workflow` key, or names a workflow outside the allow-list of the four workflow file names the schedules dispatch, then the dispatch function shall raise without issuing any request to GitHub.
+- [x] **INFRA-DISP-005**: If the invocation input has no `workflow` key, or names a workflow outside the allow-list of the five workflow file names the schedules dispatch, then the dispatch function shall raise without issuing any request to GitHub.
 - [x] **INFRA-DISP-006**: When GitHub answers `204 No Content`, the dispatch function shall return successfully.
 - [x] **INFRA-DISP-007**: If GitHub answers any status other than `204`, or the request fails in transport, then the dispatch function shall raise an error naming the status, the workflow, and the ref, and that error shall not contain the token value.
 - [x] **INFRA-DISP-008**: If GitHub answers `404`, then the error shall state that the workflow file, the `workflow_dispatch` trigger, the ref, or the token's access to the repository may each be the cause, so that four distinct faults are not read as one.
@@ -61,7 +61,7 @@ this segment is tested).
 - [x] **INFRA-OPS-003**: Both config environments shall pin `region` explicitly rather than inheriting `AWS_DEFAULT_REGION`; the `dispatch` environment shall set `capabilities` to `CAPABILITY_IAM`, and the `foundation` environment to `CAPABILITY_IAM` and `CAPABILITY_NAMED_IAM`, because its runner role carries an explicit `RoleName`.
 - [x] **INFRA-OPS-004**: `samconfig.toml` shall contain no credential value; the GitHub token is referenced by the name of its Secrets Manager secret only.
 - [x] **INFRA-OPS-005**: The repository's `.gitignore` shall ignore `.aws-sam/`.
-- [x] **INFRA-OPS-006**: The repository shall contain `bin/schedules.sh` accepting `on`, `off`, and `status`, where `on` and `off` set the `State` of all four schedules and `status` prints each schedule's current state as reported by AWS.
+- [x] **INFRA-OPS-006**: The repository shall contain `bin/schedules.sh` accepting `on`, `off`, and `status`, where `on` and `off` set the `State` of all five schedules and `status` prints each schedule's current state as reported by AWS.
 - [x] **INFRA-OPS-007**: The dispatch stack shall declare a CloudWatch alarm on the dispatch function's `Errors` metric with statistic sum, a 15-minute period, a threshold of `>= 1`, one evaluation period, and `TreatMissingData: notBreaching`.
 
 ## Testing

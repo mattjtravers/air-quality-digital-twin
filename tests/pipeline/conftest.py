@@ -94,6 +94,8 @@ def stubs(monkeypatch) -> Stubs:
         "rebuild",
     ):
         monkeypatch.setattr(cli, name, s.make(name))
+    s.results["krige_surfaces"] = pd.DataFrame({"hour": [], "status": []})
+    monkeypatch.setattr(cli, "krige_surfaces", s.make("krige_surfaces"), raising=False)
     s.connection = FakeConnection()
     monkeypatch.setattr(cli, "connect", s.make("connect"))
     s.results["connect"] = s.connection

@@ -91,7 +91,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: aqdt-ingest-purpleair
-      Description: PurpleAir snapshot ingest, four times an hour.
+      Description: PurpleAir snapshot ingest, hourly at :30.
       State: DISABLED
       ScheduleExpression: cron(30 * * * ? *)
       ScheduleExpressionTimezone: UTC
@@ -159,6 +159,24 @@ Resources:
           MaximumRetryAttempts: 2
           MaximumEventAgeInSeconds: 300
 
+  FuseSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-fuse
+      Description: Hourly kriged surfaces, following calibrate-apply.
+      State: DISABLED
+      ScheduleExpression: cron(50 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "fuse.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
   # A failed dispatch produces no workflow run, so GitHub shows nothing at all. Without this the
   # archive would just quietly stop growing.
   DispatchErrorsAlarm:
@@ -189,3 +207,4 @@ Outputs:
         - !Ref IngestAirNowSchedule
         - !Ref CalibrateFitSchedule
         - !Ref CalibrateApplySchedule
+        - !Ref FuseSchedule

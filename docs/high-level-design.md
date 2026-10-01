@@ -29,14 +29,17 @@ The twin is a pipeline of data assets, each derived from the ones before it:
    downstream stages choose what to trust and the raw record is always recoverable.
 3. **Calibration** corrects PurpleAir readings against nearby AirNow reference monitors, with
    distance-aware sensor-to-monitor matching.
-4. **Fusion** produces an hourly PM2.5 surface over the metro (regression + kriging over the
-   calibrated observations).
+4. **Fusion** produces an hourly PM2.5 surface over the metro by kriging the calibrated sensor
+   observations, with the kriging variance beside it as a direct measure of the surface's
+   uncertainty. A regression term (external drift on covariates) is a later refinement of the
+   same layer.
 5. **Transport** (future) uses HRRR wind and boundary-layer fields to advect the surface forward
    as a short-range forecast.
 6. **Evaluation** scores the surface against held-out reference monitors.
 
 Layers 1–3 are implemented for PurpleAir and AirNow, together with the scheduled runs that feed
-them. Layers 4–6 are designed at this level only so that the earlier layers do not foreclose them.
+them. Layer 4 has its own leaf design, beginning with ordinary kriging. Layers 5–6 are designed at
+this level only so that the earlier layers do not foreclose them.
 
 ### Idempotent, time-windowed batch
 
@@ -55,7 +58,7 @@ step a ready-made asset for a workflow orchestrator once backfills and lineage a
 Where EPA, NOAA, or the atmospheric-science community has an established method or format, the
 project uses it rather than inventing one: EPA's PurpleAir correction and channel-agreement criteria
 (Barkjohn et al. 2021), AQS site identifiers, GeoParquet for point observations, PostGIS for spatial
-query, CF-convention NetCDF/Zarr for gridded fields. Every stored artifact must be readable by
+query, Cloud-Optimized GeoTIFF and CF-convention NetCDF/Zarr for gridded fields. Every stored artifact must be readable by
 standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this project's code.
 
 ## Target Users
@@ -107,8 +110,9 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
   (short plumes, within-hour variability) is not captured.
 - **No workflow orchestrator yet.** Scheduled runs are dispatched directly and wrapped by nothing;
   Dagster is the intended target once backfills and lineage across a running pipeline are needed.
-- **No gridded data in PostGIS.** HRRR and any derived surfaces are stored as CF-convention
-  NetCDF/Zarr and handled with xarray; PostGIS holds point observations and site metadata only.
+- **No gridded data in PostGIS.** Fused surfaces are stored as Cloud-Optimized GeoTIFFs and HRRR
+  fields as CF-convention NetCDF/Zarr, both in the archive; PostGIS holds point observations, site
+  metadata, and per-surface metadata only.
 - **No user-facing application.** Outputs are data assets consumable by QGIS, notebooks, and
   downstream stages.
 
@@ -139,7 +143,7 @@ flowchart LR
     end
 
     subgraph schedule [GitHub Actions]
-        SCH[pipeline CLI<br/>ingest / calibrate runs]
+        SCH[pipeline CLI<br/>ingest / calibrate / fuse runs]
     end
 
     subgraph sources [External sources]
@@ -162,8 +166,11 @@ flowchart LR
         CAL[Calibration<br/>distance-aware matching]
     end
 
+    subgraph fusion [Fusion]
+        FUS[Fusion<br/>hourly kriged surface + variance]
+    end
+
     subgraph future [Later increments]
-        FUS[Fusion<br/>regression + kriging]
         TRN[Transport<br/>HRRR-driven]
         EVL[Evaluation<br/>held-out monitors]
         ZR[(Zarr / NetCDF<br/>gridded fields)]
@@ -173,13 +180,14 @@ flowchart LR
     SCH -.->|triggers| PAI
     SCH -.->|triggers| ANI
     SCH -.->|triggers| CAL
+    SCH -.->|triggers| FUS
     PA --> PAI --> ARC
     AN --> ANI --> ARC
     ARC -->|load| PG
     ARC --> CAL --> ARC
-    CAL --> FUS --> EVL
+    ARC --> FUS --> ARC
+    FUS --> EVL
     HR --> ZR --> TRN
-    FUS --> ZR
 ```
 
 ### Components
@@ -214,9 +222,15 @@ dispatch Lambda that render the pipeline's cadences as `workflow_dispatch` calls
 and no pipeline logic; it owns the resources the other components need and how they come into
 being.
 
-**Fusion, transport, evaluation** — later increments, each a separate component following the
-calibration pattern: read from the archive, write products back through the store. Named here so
-the store's schema is designed for them.
+**Fusion.** Reads calibrated sensor values for an hour from the archive, fits a variogram to that
+hour alone, and kriges a PM2.5 estimate and its kriging variance onto a fixed grid over the metro.
+Each hour's surface is written to the archive as a raster; each hour's variogram fit is written
+back through the store's primitives, so PostGIS serves which hours have surfaces and how they were
+fitted while the cells themselves stay in the raster.
+
+**Transport, evaluation** — later increments, each a separate component following the same
+pattern: read from the archive, write products back to it. Named here so the store's schema is
+designed for them.
 
 ### Data flow per run
 
@@ -229,7 +243,8 @@ for PurpleAir accumulates through repeated runs, and snapshot polls that return 
 On a schedule, each run covers a routine window that needs no argument: PurpleAir takes one
 snapshot at the middle of each hour; AirNow re-fetches a trailing window at least as long as the
 period the feed keeps revising; calibration refits once a day and re-applies over a trailing window
-each hour. Because every run is idempotent and windows overlap their predecessors, a missed or
+each hour; fusion follows calibration each hour, kriging the recent hours calibration has just
+written. Because every run is idempotent and windows overlap their predecessors, a missed or
 delayed AirNow or calibration run costs nothing but latency — the next run covers the gap. Any
 window can also be requested explicitly for backfill. PurpleAir is the exception: the snapshot
 endpoint has no history, so a missed PurpleAir run is a sensor-hour with no observation, which
@@ -284,8 +299,9 @@ EARS prefix.
 | `calibration` | `CAL` | hourly aggregation, distance-aware sensor-to-monitor matching, per-sensor fits |
 | `pipeline` | `PIPE` | the command-line entry point, routine windows, and the cadence each scheduled run follows |
 | `infrastructure` | `INFRA` | the SAM stacks, the dispatch Lambda, and every AWS resource the twin depends on |
+| `fusion` | `FUS` | per-hour variogram fits, the kriged PM2.5 surface and its variance on a fixed grid |
 
-Later increments add leaves (`fusion`, `transport`, `evaluation`) beside these.
+Later increments add leaves (`transport`, `evaluation`) beside these.
 
 ## Key Design Decisions
 
@@ -298,8 +314,8 @@ public repository, and put every run's log beside the code.
 The trigger is separate from the executor, because GitHub Actions' own `schedule:` cron trigger is
 not dependable enough to keep the archive current — it drops most occurrences outright rather than
 running them late, leaving multi-hour gaps in the schedule. AWS EventBridge Scheduler, a managed
-cron that fires to the minute, holds one schedule per routine cadence (PurpleAir, AirNow, and
-calibrate-apply hourly, calibrate-fit daily) and invokes a
+cron that fires to the minute, holds one schedule per routine cadence (PurpleAir, AirNow,
+calibrate-apply, and fusion hourly, calibrate-fit daily) and invokes a
 small Lambda that calls GitHub's `workflow_dispatch` REST API for the matching workflow.
 `workflow_dispatch` is the only trigger the workflows declare, so there is exactly one scheduled
 path and it is the reliable one.
@@ -370,6 +386,12 @@ dispersion model's baseline surface. This project has no such model — HRRR sup
 fields, not a concentration prior — and the fusion layer is designed to work from observations
 alone. Scoping in a simple emissions proxy is a possible later decision, not a design assumption.
 
+The surface is kriged from calibrated PurpleAir values only. The AirNow reference monitors are
+already the scale every calibrated value is on, and keeping them out of the surface leaves them as
+an independent check on it: evaluation scores the surface at monitors it never saw. Monitor values
+as an input to the surface — as the drift term of regression or external-drift kriging — belong to
+that later refinement, at which point evaluation moves to leave-one-out over the monitors.
+
 ### Calibration is distance-aware from the outset
 
 The D.C. metro is large and has several reference monitors, so which monitor a sensor is compared
@@ -403,16 +425,22 @@ nested API payloads and cannot export JSON Schema.
 
 ### Gridded fields live outside PostGIS
 
-HRRR inputs and any fused/forecast surfaces are CF-convention NetCDF or Zarr handled with xarray,
-which is the scientific tooling for gridded atmospheric data. PostGIS holds point observations
-only; its raster support is a poor fit for time-stepped model output.
+A gridded surface is a raster, and it is stored as one: each hour's fused surface is a
+Cloud-Optimized GeoTIFF in the archive, which QGIS and GDAL stream directly from S3 and xarray
+opens through rioxarray; HRRR inputs are CF-convention NetCDF or Zarr. PostGIS holds point
+observations and per-surface metadata — each hour's variogram fit and the location of its raster —
+so which hours have surfaces and how well they were fitted is a SQL query. The cells themselves
+stay out: a metro grid at the resolutions fusion uses is hundreds of thousands of cells per hour,
+which would make the serving layer's one-command rebuild grow without bound, and PostGIS raster
+support is a poor fit for time-stepped model output.
 
 ## Success Metrics
 
 **Ingestion, QC, calibration, and scheduling:**
 
 - Left alone, the schedules keep the archive current: every source has observations from the
-  last few hours, and a daily fit and hourly calibrated values exist for every sensor.
+  last few hours, a daily fit and hourly calibrated values exist for every sensor, a surface fit row exists for
+  every hour, and a surface for every hour with enough calibrated sensors to krige.
 - A fresh Codespace reaches a populated, queryable PostGIS from `postCreateCommand` alone.
 - Two consecutive runs over the same window, with unchanged upstream data, produce byte-identical
   archive partitions and no new rows in PostGIS.
@@ -431,8 +459,15 @@ only; its raster support is a poor fit for time-stepped model output.
 - The archive goes stale — no new observations for a source over several hours — without a
   failed scheduled run saying so.
 
-**Later increments:** leave-one-out cross-validation of the fused surface against held-out AirNow
-monitors, reported against FAIRMODE model-quality objectives.
+**Fusion:**
+
+- Every hourly surface opens in QGIS straight from S3 as a two-band raster (estimate, variance).
+- A scheduled fusion run completes well within its workflow timeout on a GitHub Actions runner at
+  the chosen grid resolution, with memory bounded independently of grid size.
+
+**Later increments:** the fused surface scored against the AirNow monitors it does not use, and by
+leave-one-out cross-validation over the sensors, reported against FAIRMODE model-quality
+objectives.
 
 ## References
 

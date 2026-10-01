@@ -38,6 +38,13 @@ EXPECTED = {
         "inputs": {"start", "end"},
         "secrets": set(),
     },
+    "fuse.yaml": {
+        "command": "aqdt fuse",
+        "group": "fuse",
+        "timeout": 20,
+        "inputs": {"start", "end"},
+        "secrets": set(),
+    },
 }
 AWS_SECRETS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
 VARIABLES = {"AQDT_ARCHIVE_URI", "AWS_DEFAULT_REGION"}

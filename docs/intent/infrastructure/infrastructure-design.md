@@ -33,7 +33,7 @@ Two CloudFormation stacks, both deployed with AWS SAM.
 | Stack | Name | Lifetime | Holds |
 |---|---|---|---|
 | Foundation | `aqdt-foundation` | Durable; outlives every other stack | The GeoParquet archive bucket and the IAM role GitHub Actions runners assume |
-| Dispatch | `aqdt-dispatch` | Disposable; torn down and redeployed freely | Four EventBridge schedules, the dispatch Lambda, its execution role and log group |
+| Dispatch | `aqdt-dispatch` | Disposable; torn down and redeployed freely | Five EventBridge schedules, the dispatch Lambda, its execution role and log group |
 
 The archive is the system of record (HLD § Persistence). Deleting the dispatch stack must cost
 nothing, and it would not be safe to make that true if the bucket shared the stack.
@@ -85,12 +85,12 @@ that other stacks in the account depend on.
 
 The workflows authenticate with the long-lived access keys of a hand-made runner IAM user; the
 role sits beside it, unused, until the workflows adopt it. Adopting it changes `PIPE-CFG-001` and
-all four workflow files — a cascade into the pipeline segment (pipeline LLD, open question 5)
+every run workflow file — a cascade into the pipeline segment (pipeline LLD, open question 4)
 rather than a change this component can make alone.
 
 ### Dispatch stack
 
-**Schedules.** Four `AWS::Scheduler::Schedule` resources, each targeting the Lambda with the
+**Schedules.** Five `AWS::Scheduler::Schedule` resources, each targeting the Lambda with the
 workflow it should dispatch:
 
 | Schedule | Expression (UTC) | Target workflow |
@@ -99,6 +99,7 @@ workflow it should dispatch:
 | `aqdt-ingest-airnow` | `cron(20 * * * ? *)` | `ingest-airnow.yaml` |
 | `aqdt-calibrate-fit` | `cron(30 0 * * ? *)` | `calibrate-fit.yaml` |
 | `aqdt-calibrate-apply` | `cron(40 * * * ? *)` | `calibrate-apply.yaml` |
+| `aqdt-fuse` | `cron(50 * * * ? *)` | `fuse.yaml` |
 
 EventBridge cron expressions carry six fields and a `?` in either the day-of-month or day-of-week
 position, so they do not transcribe directly from the five-field form. The cadences themselves and
@@ -125,12 +126,12 @@ invoke) turns them off. After any dispatch-stack deploy, `bin/schedules.sh statu
 they are still on, and `on` restores them.
 
 A schedule's `State` is also how scheduled runs are turned off and on for a maintenance window.
-Disabling the four schedules stops the dispatch at its source: no Lambda invocation, no workflow
+Disabling the five schedules stops the dispatch at its source: no Lambda invocation, no workflow
 run, nothing to skip. Manual `workflow_dispatch` runs are unaffected, so a backfill or a
 verification run works while the schedules are off.
 
-`bin/schedules.sh {on|off}` wraps the four `aws scheduler update-schedule` calls, because a
-switch that takes four commands to flip is a switch that gets flipped partially. `status` prints
+`bin/schedules.sh {on|off}` wraps the five `aws scheduler update-schedule` calls, because a
+switch that takes five commands to flip is a switch that gets flipped partially. `status` prints
 each schedule's current state, so the answer to "are the schedules on?" comes from AWS rather than
 from memory.
 
@@ -143,9 +144,9 @@ own: any `workflow_dispatch` they receive, they run.
 {"workflow": "ingest-purpleair.yaml"}
 ```
 
-The handler requires the `workflow` key, requires its value to be one of the four workflow file
+The handler requires the `workflow` key, requires its value to be one of the five workflow file
 names it knows, and raises otherwise. The allow-list matters because the value becomes a path
-segment in the URL the function calls; nothing but these four schedules should ever be able to
+segment in the URL the function calls; nothing but these five schedules should ever be able to
 name a workflow, and an unknown name is a misconfiguration worth failing loudly rather than
 forwarding to GitHub.
 
@@ -156,7 +157,7 @@ one that does clear means a run dispatched hours after the window it was meant f
 retries cover a transient GitHub error; beyond that the next occurrence is the retry, exactly as
 it is for a failed run.
 
-**Lambda.** One function serves all four schedules, each naming its workflow in the input.
+**Lambda.** One function serves all five schedules, each naming its workflow in the input.
 Its name is `${AWS::StackName}-dispatch` — `aqdt-dispatch-dispatch` for the `aqdt-dispatch`
 stack — and its log group (`/aws/lambda/aqdt-dispatch-dispatch`) and alarm
 (`aqdt-dispatch-dispatch-errors`) derive from the same expression. Python 3.13, handler
@@ -349,7 +350,7 @@ infra/
     app/
       handler.py         # lambda_handler; no dependencies beyond the runtime
 bin/
-  schedules.sh           # on | off | status across the four schedules
+  schedules.sh           # on | off | status across the five schedules
 samconfig.toml
 tests/infrastructure/
   test_foundation_template.py
@@ -361,7 +362,7 @@ tests/infrastructure/
 
 Templates are tested as data: parsed with a PyYAML loader that passes through SAM's `!Ref`,
 `!GetAtt`, and `!Sub` short-form tags, then asserted on structure — that the bucket carries both
-retain policies, that four schedules exist with the expected expressions and
+retain policies, that five schedules exist with the expected expressions and
 `FlexibleTimeWindow: OFF`, that the Lambda's policy names exactly one secret, that the runner
 role's trust policy names this repository. No test calls AWS, so the suite runs in CI without
 credentials, as every other test in this project does. One test shells out to `sam validate` and
@@ -390,7 +391,7 @@ request, and that each distinguished failure status raises with its own message.
 | Archive bucket name | Pinned explicitly in the template | `AQDT_ARCHIVE_URI` stays a value set once in the repository variable and the Codespaces secret, with nothing plumbing stack outputs into GitHub. |
 | Bucket protection | `DeletionPolicy: Retain`, `UpdateReplacePolicy: Retain`, versioning with 30-day noncurrent expiry | PurpleAir history is not re-fetchable, so a damaged partition cannot be rebuilt from upstream. Retain guards the bucket; versioning guards its contents; expiry bounds the cost of a partition rewritten ~96 times a day. |
 | Runner credential | GitHub OIDC provider and an assumable role scoped to the archive prefix | Short-lived credentials leave no access key in repository secrets, and the principal can do exactly what a run needs. Declaring it is additive; adopting it is a pipeline-segment cascade. |
-| One Lambda for four schedules | Target workflow passed as the schedule's `Input` | A new cadence becomes a new schedule rather than new code, and there is one dispatch path to test. |
+| One Lambda for every schedule | Target workflow passed as the schedule's `Input` | A new cadence becomes a new schedule rather than new code, and there is one dispatch path to test. |
 | Lambda source location | `infra/dispatch/app/`, outside `src/aqdt/` | `CodeUri` bundles what it points at; the pipeline package carries GeoPandas, Pandera, and PyArrow, which a dispatcher must not ship. |
 | Lambda dependencies | None beyond the runtime (`boto3`, `urllib.request`) | No `requirements.txt` means the deployment package is one file of kilobytes, `sam deploy` packages it with no build step, and there is no dependency to keep patched in a function that holds a credential. |
 | Schedule jitter | `FlexibleTimeWindow: OFF` | Firing at the stated minute is the property this design exists to obtain. |
@@ -404,7 +405,7 @@ request, and that each distinguished failure status raises with its own message.
 | Schedule retry policy | `MaximumRetryAttempts: 2`, `MaximumEventAgeInSeconds: 300` | The service default of up to 185 attempts over 24 h turns a non-clearing failure into hundreds of errors and a clearing one into a run dispatched hours after its window. Beyond two quick retries the next occurrence is the retry, as it is for a failed run. |
 | Secret grant | `...:secret:{name}-??????` | A Secrets Manager ARN ends in a six-character suffix assigned at creation, so it cannot be composed from the name; the wildcard is the narrowest grant expressible from a name, and it survives a secret recreated under the same name. |
 | OIDC provider creation | Parameterized: create it, or take an existing provider's ARN; `DeletionPolicy: Retain` either way | An IAM OIDC provider is an account-level singleton per issuer URL, so creating a second fails and deleting this stack would otherwise remove one that other stacks depend on. |
-| Schedule input | A JSON object with a `workflow` key, validated against an allow-list of the four workflow file names | The value becomes a path segment in the URL the function calls, so it is checked rather than forwarded; an object leaves room for a second key without changing the contract. |
+| Schedule input | A JSON object with a `workflow` key, validated against an allow-list of the workflow file names the schedules target | The value becomes a path segment in the URL the function calls, so it is checked rather than forwarded; an object leaves room for a second key without changing the contract. |
 | Alarm configuration | `Errors`, sum over 15 min, `>= 1`, one evaluation period, `TreatMissingData: notBreaching` | One failed dispatch is worth knowing about given short retries and a daily schedule with no second chance; `notBreaching` keeps the gaps between sparse schedules from alarming on their own. |
 | `samconfig.toml` in version control | Committed, carrying stack names, region, and capabilities; parameter values are the templates' own `Default`s | The project's "configuration is environment variables, never files" rule governs what a run reads at runtime; a deploy-time parameter describes a resource and belongs beside the template that consumes it. No value in it is a credential. |
 | Ref that scheduled runs execute | `main`, fixed in the stack; no schedule carries a ref | A scheduled run should execute the reviewed definition on the default branch. Running another branch stays possible by hand, where the person doing it chose the branch. |
@@ -420,7 +421,7 @@ request, and that each distinguished failure status raises with its own message.
 1. Whether anything should detect a template merged to `main` but never deployed. Deployment is a
    developer action from a disposable Codespace, so deployed state can diverge from the repository
    with nothing reporting it.
-2. Whether the four schedules should carry an `AWS::Scheduler::ScheduleGroup`, which would give
+2. Whether the schedules should carry an `AWS::Scheduler::ScheduleGroup`, which would give
    them a shared namespace, though not a single on/off switch — a group's schedules are still
    enabled and disabled one at a time, which is what `bin/schedules.sh` exists to hide.
 3. Whether the foundation stack should also declare the PostGIS-side resources if the serving

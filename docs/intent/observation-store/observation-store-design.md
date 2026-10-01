@@ -199,6 +199,7 @@ That split is how "sortedness applies to partitions only" is expressed in code.
     date={YYYY-MM-DD}/
       observations.parquet
   calibration/...          # derived products, laid out by their own components
+  fusion/...
 ```
 
 - `archive_uri` comes from the `AQDT_ARCHIVE_URI` environment variable and is any `fsspec` URI.
@@ -315,6 +316,31 @@ The registry `aqdt.registry.PRODUCTS` lists every product in the project in load
 PostGIS layer looks to learn what to create and load; a component adds its products there and
 nowhere else.
 
+### Guarded objects
+
+Some archive artifacts are whole objects rather than merged partitions — fusion's hourly rasters
+are the first. They need the same guarantees a partition has, without a frame to merge, so the
+store exposes one more primitive:
+
+`replace_object(archive_uri, key, produce) -> str | None` makes the object at
+`{archive_uri}/{key}` equal to what `produce()` returns — bytes to write, or `None` for "this
+object should not exist" — and returns its URI, or `None` when it ends absent.
+
+- **S3.** The store reads the object's current ETag (a `HEAD`; absent is a valid state), then
+  calls `produce()`, then writes with `If-Match: <ETag>` (or `If-None-Match: *` when it was
+  absent), or for `None` deletes with `If-Match: <ETag>` (nothing to do when it was absent). A
+  refused write or delete means another writer changed the object after the token was read: the
+  store re-reads the token and calls `produce()` again, up to the same 5 attempts as a partition
+  before failing with an error naming the object.
+- **Local filesystem.** The same `.{filename}.lock` advisory lock as a partition, held across
+  `produce()` and the atomic rename (or removal).
+
+Because `produce()` runs after the token is read, a caller that reads its inputs inside
+`produce()` gets a stronger property than atomicity: an object that is successfully replaced was
+always produced from inputs read after every earlier competing replacement landed, so a slow
+writer can never put back an older version over a newer one. The bucket check of
+`resolve_archive_uri` applies as it does to every archive write.
+
 ### Read semantics
 
 `read_observations(archive_uri, source=None, start=None, end=None)` returns a validated
@@ -426,19 +452,21 @@ src/aqdt/
     schemas.py     # Source, SiteType, QcFlag, Site, Observation, BoundingBox, IngestSummary (Pydantic)
     frames.py      # SitesFrame, ObservationsFrame (Pandera); *_to_frame builders; validate_partition
     products.py    # Product definition; the observation and site products
-    archive.py     # write_partitioned / read_partitioned and the observation/site wrappers
+    archive.py     # write_partitioned / read_partitioned, replace_object, observation/site wrappers
     postgis.py     # apply_schema, load_partitions, rebuild
     sql/           # ordered schema files
   registry.py      # PRODUCTS: every product in the project, in load order
   purpleair/       # purpleair-ingest segment
   airnow/          # airnow-ingest segment
   calibration/     # calibration segment
+  fusion/          # fusion segment
   pipeline/        # pipeline segment (the aqdt CLI)
 tests/
   observation_store/
   purpleair/
   airnow/
   calibration/
+  fusion/
   pipeline/
 ```
 
@@ -468,6 +496,7 @@ tests/
 | Schema migrations | Ordered SQL files, idempotent `create if not exists` | A handful of tables and no ORM; revisit when a destructive change is needed. |
 | GeoParquet writer | GeoPandas `to_parquet` | GeoPandas writes standards-compliant GeoParquet metadata and is already the read tool of choice. |
 | Write mechanics for derived products | Store exposes `write_partitioned` / `read_partitioned` over a `Product` definition; products own their schemas and tables | One implementation of determinism, atomicity, and validation is easier to get right and keep right than one per component, and leaving schema ownership with each component keeps the store from being a bottleneck for every later layer's design. |
+| Whole-object writes | `replace_object(archive_uri, key, produce)`: token first, then `produce()`, then a conditional write or delete; retried from the token on refusal | An artifact with no rows to merge still needs atomic replacement and one writer at a time; calling `produce()` inside the guarded section lets the caller's inputs be as fresh as the token, so no older version can replace a newer one. |
 | Partition keys | Derived by functions on the frame, rendered to strings | The observation key `date` is a function of `observed_at`, and frame models forbid extra columns; deriving keeps the archive schema equal to the record schema. |
 | Partition directory style | Hive `key=value` for every key, including `source` | Uniform Hive layout lets pyarrow and DuckDB discover partitions without hints. |
 | How PostGIS learns about products | A registry module listing every product in load order | A single ordered list gives `rebuild` and `load_partitions` one source of truth, keeps the store from importing its own consumers, and leaves exactly one write path into PostGIS. |

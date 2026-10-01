@@ -39,15 +39,22 @@ def test_console_script_and_module_alias():
 
 
 # @spec PIPE-CLI-002
-def test_exactly_the_six_sub_commands(env, stubs):
+def test_exactly_the_seven_sub_commands(env, stubs):
     for argv in (
         ["ingest", "purpleair"],
         ["ingest", "airnow"],
         ["calibrate", "fit"],
         ["calibrate", "apply"],
+        ["fuse"],
     ):
         assert run(argv) == 0
-    for argv in (["ingest", "nope"], ["calibrate", "nope"], ["db", "nope"], ["nope"]):
+    for argv in (
+        ["ingest", "nope"],
+        ["calibrate", "nope"],
+        ["db", "nope"],
+        ["fuse", "nope"],
+        ["nope"],
+    ):
         with pytest.raises(SystemExit) as exc:
             run(argv)
         assert exc.value.code == 2
@@ -93,6 +100,26 @@ def test_calibrate_apply_dispatch(env, stubs):
     assert archive_uri == ARCHIVE
     assert (start, end) == (NOW_H - 6 * H, NOW_H)
     assert isinstance(settings, CalibrationSettings)
+
+
+# @spec PIPE-CLI-014
+def test_fuse_dispatch_with_trailing_three_hour_window(env, stubs, monkeypatch):
+    from aqdt.fusion.schemas import FusionSettings
+
+    monkeypatch.delenv("AQDT_FUS_RESOLUTION_M", raising=False)
+    assert run(["fuse"]) == 0
+    call = stubs.only("krige_surfaces")
+    archive_uri, start, end, settings = call.args[:4]
+    assert archive_uri == ARCHIVE
+    assert (start, end) == (NOW_H - 3 * H, NOW_H)
+    assert isinstance(settings, FusionSettings)
+    assert call.kwargs.get("conn") is None
+
+    stubs.calls.clear()
+    assert run(["fuse", "--start", "2026-09-20T10:00", "--end", "2026-09-20T14:00"]) == 0
+    start, end = stubs.only("krige_surfaces").args[1:3]
+    assert start == datetime(2026, 9, 20, 10, tzinfo=UTC)
+    assert end == datetime(2026, 9, 20, 14, tzinfo=UTC)
 
 
 # @spec PIPE-CLI-007
@@ -144,8 +171,10 @@ def test_each_command_constructs_only_its_own_settings(env, stubs, monkeypatch):
     assert run(["ingest", "airnow"]) == 0
     assert run(["calibrate", "fit"]) == 0
     assert run(["calibrate", "apply"]) == 0
+    assert run(["fuse"]) == 0
     monkeypatch.delenv("AIRNOW_API_KEY")
     assert run(["calibrate", "fit"]) == 0
+    assert run(["fuse"]) == 0
     assert run(["ingest", "airnow"]) != 0
 
 
@@ -262,6 +291,24 @@ def test_apply_prints_window_and_row_count(env, stubs, capsys):
         "window_start": "2026-09-21T08:00:00Z",
         "window_end": "2026-09-21T14:00:00Z",
         "rows": 3,
+    }
+
+
+# @spec PIPE-OUT-006
+def test_fuse_prints_window_and_counts_by_status(env, stubs, capsys):
+    stubs.results["krige_surfaces"] = pd.DataFrame(
+        {
+            "hour": [NOW_H - 3 * H, NOW_H - 2 * H, NOW_H - H],
+            "status": ["kriged", "kriged", "insufficient_points"],
+        }
+    )
+    assert run(["fuse"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1
+    assert json.loads(out) == {
+        "window_start": "2026-09-21T11:00:00Z",
+        "window_end": "2026-09-21T14:00:00Z",
+        "surfaces": {"kriged": 2, "insufficient_points": 1, "fit_failed": 0},
     }
 
 

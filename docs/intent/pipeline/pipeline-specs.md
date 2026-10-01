@@ -13,15 +13,16 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 ## Command-Line Interface
 
 - [x] **PIPE-CLI-001**: The pipeline shall expose a console script `aqdt` (declared under `[project.scripts]` in `pyproject.toml`) and the alias `python -m aqdt`, both dispatching to `aqdt.pipeline.cli:main`.
-- [x] **PIPE-CLI-002**: The pipeline shall provide the sub-commands `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply`, `db schema`, and `db rebuild`, and no others.
+- [x] **PIPE-CLI-002**: The pipeline shall provide the sub-commands `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply`, `fuse`, `db schema`, and `db rebuild`, and no others.
 - [x] **PIPE-CLI-003**: When `aqdt ingest purpleair` is invoked, the pipeline shall call `ingest_purpleair(PurpleAirSettings(), archive_uri, conn)` exactly once.
 - [x] **PIPE-CLI-004**: When `aqdt ingest airnow` is invoked, the pipeline shall resolve the window per PIPE-WIN and call `ingest_airnow(AirNowSettings(), archive_uri, start, end, conn)` exactly once with the resolved bounds.
 - [x] **PIPE-CLI-005**: When `aqdt calibrate fit` is invoked, the pipeline shall resolve `as_of` per PIPE-WIN-004 and call `fit_calibrations(archive_uri, as_of, CalibrationSettings(), conn)` exactly once.
 - [x] **PIPE-CLI-006**: When `aqdt calibrate apply` is invoked, the pipeline shall resolve the window per PIPE-WIN and call `apply_calibrations(archive_uri, start, end, CalibrationSettings(), conn)` exactly once with the resolved bounds.
+- [x] **PIPE-CLI-014**: When `aqdt fuse` is invoked, the pipeline shall resolve the window per PIPE-WIN with `default_hours=3` and call `krige_surfaces(archive_uri, start, end, FusionSettings(), conn)` exactly once with the resolved bounds.
 - [x] **PIPE-CLI-007**: When `aqdt db schema` or `aqdt db rebuild` is invoked, the pipeline shall open the connection named by `DATABASE_URL` and call the store's `apply_schema(conn)` or `rebuild(conn, archive_uri)` respectively, failing with an error naming `DATABASE_URL` when it is unset.
 - [x] **PIPE-CLI-008**: The pipeline shall accept the global option `--archive-uri` and shall resolve the archive through the store's `resolve_archive_uri` (the option, else `AQDT_ARCHIVE_URI`) before dispatching any run, so that a run receives a concrete URI and an unset archive fails before any request or write with an error naming `AQDT_ARCHIVE_URI`.
 - [x] **PIPE-CLI-009**: The pipeline shall accept `--log-level` (default `INFO`) and configure Python `logging` to stderr at that level before any run starts.
-- [x] **PIPE-CLI-010**: When a sub-command is invoked, the pipeline shall construct only the settings that sub-command needs, so that a missing `PURPLEAIR_API_KEY` does not prevent `aqdt ingest airnow`, `aqdt calibrate fit`, or `aqdt calibrate apply` from running.
+- [x] **PIPE-CLI-010**: When a sub-command is invoked, the pipeline shall construct only the settings that sub-command needs, so that a missing `PURPLEAIR_API_KEY` does not prevent `aqdt ingest airnow`, `aqdt calibrate fit`, `aqdt calibrate apply`, or `aqdt fuse` from running.
 - [x] **PIPE-CLI-011**: When `--start` is given without `--end`, `--end` without `--start`, `--hours` together with either, or `--hours` with a non-positive value, the pipeline shall reject the invocation as a usage error before resolving a window.
 - [x] **PIPE-CLI-012**: When a timestamp option (`--start`, `--end`, `--as-of`) is given, the pipeline shall parse it as ISO 8601 and treat a value without a UTC offset as UTC.
 - [x] **PIPE-CLI-013**: When configuring logging, the pipeline shall set the `httpx` and `httpcore` loggers to `WARNING` whatever `--log-level` is given, so that no request URL is logged — AirNow authenticates with an `API_KEY` query parameter, and those libraries log every request URL at `INFO` and below.
@@ -39,6 +40,7 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 - [x] **PIPE-OUT-001**: When an ingest run completes, the pipeline shall print its `IngestSummary` as a single JSON object on one line of stdout, with datetimes as ISO 8601 UTC strings.
 - [x] **PIPE-OUT-002**: When `aqdt calibrate fit` completes, the pipeline shall print a single JSON object with `as_of`, `window_start`, `window_end`, and `fits` (a mapping of status → count).
 - [x] **PIPE-OUT-003**: When `aqdt calibrate apply` completes, the pipeline shall print a single JSON object with `window_start`, `window_end`, and `rows` (the number of calibrated rows).
+- [x] **PIPE-OUT-006**: When `aqdt fuse` completes, the pipeline shall print a single JSON object with `window_start`, `window_end`, and `surfaces` (a mapping of surface status → count).
 - [x] **PIPE-OUT-004**: When a run completes without error, the pipeline shall exit with status 0; when the run raises, it shall log the exception to stderr, print nothing to stdout, and exit with a non-zero status.
 - [x] **PIPE-OUT-005**: The pipeline shall not retry a failed run; retrying is the next scheduled occurrence's job.
 
@@ -50,11 +52,11 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 
 ## Workflows
 
-- [x] **PIPE-SCHED-001**: The repository shall contain the workflows `.github/workflows/ingest-purpleair.yaml`, `ingest-airnow.yaml`, `calibrate-fit.yaml`, and `calibrate-apply.yaml`, each declaring `workflow_dispatch` as its only trigger, so that every run — scheduled or by hand — reaches the workflow by the same path.
-- [x] **PIPE-SCHED-003**: Each workflow shall run exactly one `aqdt` command — `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply` respectively — via `uv run` after `uv sync --no-dev`.
-- [x] **PIPE-SCHED-004**: Each workflow shall declare a `concurrency` group of its own, named after the workflow (`ingest-purpleair`, `ingest-airnow`, `calibrate-fit`, `calibrate-apply`), with `cancel-in-progress: false`, so that two runs of the same workflow are queued rather than run at once and a queued run of one workflow is never superseded by a run of another (correctness under concurrent writers is the observation store's, OBS-ARCHIVE-026).
-- [x] **PIPE-SCHED-005**: Each workflow's job shall declare `timeout-minutes` of 10 (PurpleAir), 20 (AirNow), 30 (fit), and 20 (apply).
-- [x] **PIPE-SCHED-006**: When a workflow is started by `workflow_dispatch` with non-empty `start`/`end` (ingest airnow, calibrate apply) or `as_of` (calibrate fit) inputs, the workflow shall pass them as the corresponding command options; empty inputs shall pass nothing, so the routine window applies.
+- [x] **PIPE-SCHED-001**: The repository shall contain the workflows `.github/workflows/ingest-purpleair.yaml`, `ingest-airnow.yaml`, `calibrate-fit.yaml`, `calibrate-apply.yaml`, and `fuse.yaml`, each declaring `workflow_dispatch` as its only trigger, so that every run — scheduled or by hand — reaches the workflow by the same path.
+- [x] **PIPE-SCHED-003**: Each workflow shall run exactly one `aqdt` command — `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply`, `fuse` respectively — via `uv run` after `uv sync --no-dev`.
+- [x] **PIPE-SCHED-004**: Each workflow shall declare a `concurrency` group of its own, named after the workflow (`ingest-purpleair`, `ingest-airnow`, `calibrate-fit`, `calibrate-apply`, `fuse`), with `cancel-in-progress: false`, so that two runs of the same workflow are queued rather than run at once and a queued run of one workflow is never superseded by a run of another (correctness under concurrent writers is the observation store's, OBS-ARCHIVE-026).
+- [x] **PIPE-SCHED-005**: Each workflow's job shall declare `timeout-minutes` of 10 (PurpleAir), 20 (AirNow), 30 (fit), 20 (apply), and 20 (fuse).
+- [x] **PIPE-SCHED-006**: When a workflow is started by `workflow_dispatch` with non-empty `start`/`end` (ingest airnow, calibrate apply, fuse) or `as_of` (calibrate fit) inputs, the workflow shall pass them as the corresponding command options; empty inputs shall pass nothing, so the routine window applies.
 - [x] **PIPE-SCHED-007**: No workflow shall set `DATABASE_URL`, so that scheduled runs write the archive only.
 - [x] **PIPE-SCHED-008**: No workflow shall commit, push, or upload artifacts to the repository; the archive is the only output.
 - [x] **PIPE-SCHED-009**: No workflow shall gate its job on an activation condition; scheduled runs are turned off at their source by disabling the EventBridge schedules that dispatch them (`INFRA-OPS-006`), so a workflow that receives a dispatch always runs it.

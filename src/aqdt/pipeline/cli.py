@@ -21,6 +21,8 @@ from aqdt.airnow.models import AirNowSettings
 from aqdt.calibration.apply import apply_calibrations
 from aqdt.calibration.fit import fit_calibrations
 from aqdt.calibration.schemas import CalibrationSettings, FitStatus
+from aqdt.fusion.run import krige_surfaces
+from aqdt.fusion.schemas import FusionSettings, SurfaceStatus
 from aqdt.observation_store.archive import resolve_archive_uri
 from aqdt.observation_store.postgis import DATABASE_URL_VAR, apply_schema, connect, rebuild
 from aqdt.pipeline.windows import DEFAULT_HOURS, resolve_as_of, resolve_window
@@ -28,6 +30,9 @@ from aqdt.purpleair.ingest import ingest_purpleair
 from aqdt.purpleair.models import PurpleAirSettings
 
 log = logging.getLogger("aqdt.pipeline")
+
+#: Fuse's routine window: the latest hour, and a missed or late run covered twice over.
+FUSE_HOURS = 3
 
 
 # @spec PIPE-CLI-012
@@ -79,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--as-of", type=_timestamp, help="fit as_of (default: last 00:00 UTC)")
     apply_ = steps.add_parser("apply", help="calibrate sensor hours in a window")
     _add_window_options(apply_)
+
+    fuse = commands.add_parser("fuse", help="krige hourly PM2.5 surfaces in a window")
+    _add_window_options(fuse)
 
     db = commands.add_parser("db", help="PostGIS serving layer")
     actions = db.add_subparsers(dest="action", required=True)
@@ -145,7 +153,7 @@ class _Connection:
 
 
 # @spec PIPE-CLI-003, PIPE-CLI-004, PIPE-CLI-005, PIPE-CLI-006, PIPE-CLI-007, PIPE-CLI-010
-# @spec PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003
+# @spec PIPE-CLI-014, PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003, PIPE-OUT-006
 def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict[str, Any] | None:
     """Run the requested command and return what to print (``None`` for the db commands)."""
     if args.command == "db":
@@ -185,6 +193,21 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             "window_start": _iso(as_of - timedelta(days=settings.window_days)),
             "window_end": _iso(as_of),
             "fits": {status.value: counts.get(status, 0) for status in FitStatus},
+        }
+
+    if args.command == "fuse":
+        settings = FusionSettings()
+        start, end = resolve_window(now, args.start, args.end, args.hours, default_hours=FUSE_HOURS)
+        log.info("fuse window [%s, %s)", _iso(start), _iso(end))
+        with _Connection(args.no_postgis) as conn:
+            frame = krige_surfaces(archive_uri, start, end, settings, conn=conn)
+        counts = Counter(frame["status"])
+        return {
+            "window_start": _iso(start),
+            "window_end": _iso(end),
+            "surfaces": {
+                status.value: int(counts.get(status.value, 0)) for status in SurfaceStatus
+            },
         }
 
     settings = CalibrationSettings()
