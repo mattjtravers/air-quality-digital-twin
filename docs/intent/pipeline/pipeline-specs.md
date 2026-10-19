@@ -61,6 +61,7 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 - [x] **PIPE-SCHED-008**: No workflow shall commit, push, or upload artifacts to the repository; the archive is the only output.
 - [x] **PIPE-SCHED-010**: Every workflow's job, including CI, shall run on the explicitly named `ubuntu-24.04` runner image rather than a floating label such as `ubuntu-latest`.
 - [x] **PIPE-SCHED-011**: The repository shall contain a `.python-version` file naming a single Python minor version, and every workflow's job, including CI, shall set up Python with `actions/setup-python` reading `python-version-file: .python-version`, so that no job's interpreter is resolved from the `requires-python` range in `pyproject.toml`.
+- [x] **PIPE-SCHED-012**: `pyproject.toml` shall pin a single uv release as `[tool.uv] required-version = "==X.Y.Z"`, every workflow's job, including CI, shall install uv with `astral-sh/setup-uv` without a `version` input (so that the pin is the only source of the release), and the devcontainer's uv feature shall name the same release.
 - [x] **PIPE-SCHED-009**: No workflow shall gate its job on an activation condition; scheduled runs are turned off at their source by disabling the EventBridge schedules that dispatch them (`INFRA-OPS-006`), so a workflow that receives a dispatch always runs it.
 
 ## Configuration

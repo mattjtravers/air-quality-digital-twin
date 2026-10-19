@@ -1,6 +1,8 @@
 """The GitHub Actions schedules — PIPE-SCHED, PIPE-CFG-001, PIPE-CFG-003."""
 
+import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -176,6 +178,22 @@ def test_every_workflow_reads_python_version_file():
             ]
             assert len(setups) == 1, path.name
             assert setups[0]["with"] == {"python-version-file": ".python-version"}, path.name
+
+
+# @spec PIPE-SCHED-012
+def test_uv_release_is_pinned_once_in_pyproject():
+    pin = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]["required-version"]
+    release = re.fullmatch(r"==(\d+\.\d+\.\d+)", pin).group(1)
+    for path in sorted(WORKFLOWS.glob("*.yaml")):
+        for job in yaml.safe_load(path.read_text())["jobs"].values():
+            setups = [
+                s for s in job["steps"] if s.get("uses", "").startswith("astral-sh/setup-uv@")
+            ]
+            assert len(setups) == 1, path.name
+            assert "version" not in setups[0].get("with", {}), path.name
+    devcontainer = json.loads((ROOT / ".devcontainer" / "devcontainer.json").read_text())
+    feature = devcontainer["features"]["ghcr.io/jsburckhardt/devcontainer-features/uv:1"]
+    assert feature == {"version": release}
 
 
 # @spec PIPE-CFG-001

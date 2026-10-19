@@ -5,7 +5,9 @@
    "workspaceFolder": "/workspaces/air-quality-digital-twin",
    "shutdownAction": "stopCompose",
    "features": {
-      "ghcr.io/jsburckhardt/devcontainer-features/uv:1": {},
+      "ghcr.io/jsburckhardt/devcontainer-features/uv:1": {
+         "version": "0.13.2"
+      },
       "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
       "ghcr.io/devcontainers/features/aws-cli:1": {
          "version": "latest"

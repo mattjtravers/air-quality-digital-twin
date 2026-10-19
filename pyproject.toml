@@ -43,6 +43,9 @@ dev = [
     "ruff==0.16.8",
 ]
 
+[tool.uv]
+required-version = "==0.13.2"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
