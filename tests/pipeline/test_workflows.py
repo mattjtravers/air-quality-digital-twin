@@ -166,6 +166,18 @@ def test_every_workflow_names_its_runner_image():
             assert job["runs-on"] == "ubuntu-24.04", path.name
 
 
+# @spec PIPE-SCHED-011
+def test_every_workflow_reads_python_version_file():
+    assert re.fullmatch(r"3\.\d+\n?", (ROOT / ".python-version").read_text())
+    for path in sorted(WORKFLOWS.glob("*.yaml")):
+        for job in yaml.safe_load(path.read_text())["jobs"].values():
+            setups = [
+                s for s in job["steps"] if s.get("uses", "").startswith("actions/setup-python@")
+            ]
+            assert len(setups) == 1, path.name
+            assert setups[0]["with"] == {"python-version-file": ".python-version"}, path.name
+
+
 # @spec PIPE-CFG-001
 def test_each_workflow_exposes_only_what_its_command_needs(workflow):
     name, wf, expected = workflow
