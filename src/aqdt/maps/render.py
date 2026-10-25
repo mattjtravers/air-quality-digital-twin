@@ -135,8 +135,8 @@ def small_multiples(
     settings = settings or MapSettings()
     nrows = max(1, math.ceil(len(panels) / ncols))
     aspect = (grid.height / grid.width) if grid.width else 1.0
-    panel_in = (width_in - 1.0) / ncols  # less the shared colorbar and its label
-    height_in = nrows * (panel_in * aspect + 0.45) + 0.7  # panel titles; axis labels and legend
+    panel_in = (width_in - 1.4) / ncols  # less the y labels, the shared colorbar and its label
+    height_in = nrows * (panel_in * aspect + 0.3) + 0.75  # panel titles; x labels and legend
     fig, axes = plt.subplots(
         nrows,
         ncols,

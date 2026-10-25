@@ -473,7 +473,14 @@ def _availability(
 
 
 def _magnitudes(
-    matchups, median_corrected, rebuilt, decomposition, sensitivity, stored, observations
+    matchups,
+    median_corrected,
+    rebuilt,
+    decomposition,
+    sensitivity,
+    stored,
+    observations,
+    availability,
 ) -> dict:
     out: dict[str, str] = {}
     table = rebuilt.table
@@ -514,6 +521,13 @@ def _magnitudes(
     if len(observations):
         rate = observations["qc_flags"].map(len).gt(0).mean()
         out[budget.AIRNOW_DATA] = f"{100 * rate:.1f}% of monitor-hours in the window flagged"
+    targets = availability["calibration_targets"].sum() if len(availability) else 0
+    if targets:
+        out[budget.DEPENDENCE] = (
+            f"{int(targets)} kriging-input sensors calibrated against a scored monitor; median "
+            f"distance {availability['median_target_distance_m'].median() / 1000:.1f} km "
+            "(availability.csv)"
+        )
     slopes = (
         stored.loc[stored["status"] == "fitted", "slope"] if len(stored) else pd.Series(dtype=float)
     )
@@ -658,6 +672,7 @@ def evaluate(
         observations[observations["observed_at"].isin(kriged["hour"])]
         if len(kriged)
         else observations,
+        availability,
     )
     error_budget = budget.error_budget(magnitudes)
 
