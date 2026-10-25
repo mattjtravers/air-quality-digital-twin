@@ -52,7 +52,9 @@ metres — the projection calibration matches distances in), and sensors whose p
 coordinates coincide when rounded to the metre are merged into one point carrying the mean of
 their values: co-located sensors are one location's estimate, and duplicate locations make the
 kriging system singular. `n_sensors` counts the rows used; `n_points` counts the distinct
-locations kriged.
+locations kriged. The selected rows, each with its `fit_status`, `fit_as_of`, corrected value, and
+projected coordinates, are available on their own (`hour_sensors`), so a consumer that needs to
+know which sensors an hour was kriged from rebuilds them with the same rule.
 
 ## Grid
 
@@ -216,7 +218,7 @@ src/aqdt/fusion/
   frames.py     # SurfaceFitFrame (Pandera)
   products.py   # SURFACE_FITS
   grid.py       # Grid, grid_for(bbox, resolution_m)
-  points.py     # hour_points: read, filter, project, merge co-located sensors
+  points.py     # hour_sensors (filter, locate, project), hour_points (merge co-located sensors)
   krige.py      # select_variogram, predict_chunked
   raster.py     # encode_surface (COG bytes), surface paths
   run.py        # krige_surfaces
@@ -261,6 +263,9 @@ Dependencies: `pykrige`, `rasterio` (its wheels bundle GDAL with the COG driver)
    a per-point nugget, if `pooled` sensors prove noisier.
 5. A domain mask for open water (Potomac, Anacostia, Chesapeake tributaries) once exposure
    estimates need population-weighted cells.
+6. A third raster band carrying the total variance — kriging variance plus the propagated
+   calibration uncertainty evaluation computes — once evaluation's Monte Carlo confirms the
+   analytic propagation; it needs calibration to record each fit's parameter covariance.
 
 ## References
 

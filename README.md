@@ -29,6 +29,15 @@ later phase.
   have no monitor in range, use a pooled, network-wide fallback fit built
   from already-accepted sensors. Fits refit daily over a rolling 30-day
   window.
+- **Fusion.** Each hour, the calibrated sensor values are kriged onto a
+  100 m grid over the metro (ordinary kriging, variogram refit per hour),
+  written as a two-band Cloud-Optimized GeoTIFF: PM2.5 and its kriging
+  variance.
+- **Evaluation.** `aqdt evaluate --start T --end T --out DIR` scores the
+  stored surfaces against the AirNow monitors they never saw, adds the
+  calibration fits' uncertainty to the kriging variance (checked by Monte
+  Carlo), and writes an error budget, tables, and print-ready figures. It
+  runs on demand and reads the archive only.
 - **Serving.** A PostGIS database, rebuildable from the S3 archive at any
   time, serves calibrated hourly observations for querying and mapping.
 

@@ -48,6 +48,13 @@ class Stubs:
         return matching[0]
 
 
+@dataclass
+class EvaluationResult:
+    """Stands in for ``EvaluationSummary``: the attributes the CLI prints."""
+
+    headline: dict = field(default_factory=lambda: {"n": 3, "bias": 0.5})
+
+
 class FakeConnection:
     def __init__(self):
         self.closed = False
@@ -96,6 +103,8 @@ def stubs(monkeypatch) -> Stubs:
         monkeypatch.setattr(cli, name, s.make(name))
     s.results["krige_surfaces"] = pd.DataFrame({"hour": [], "status": []})
     monkeypatch.setattr(cli, "krige_surfaces", s.make("krige_surfaces"), raising=False)
+    s.results["evaluate"] = EvaluationResult()
+    monkeypatch.setattr(cli, "evaluate", s.make("evaluate"), raising=False)
     s.connection = FakeConnection()
     monkeypatch.setattr(cli, "connect", s.make("connect"))
     s.results["connect"] = s.connection

@@ -13,12 +13,13 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 ## Command-Line Interface
 
 - [x] **PIPE-CLI-001**: The pipeline shall expose a console script `aqdt` (declared under `[project.scripts]` in `pyproject.toml`) and the alias `python -m aqdt`, both dispatching to `aqdt.pipeline.cli:main`.
-- [x] **PIPE-CLI-002**: The pipeline shall provide the sub-commands `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply`, `fuse`, `db schema`, and `db rebuild`, and no others.
+- [x] **PIPE-CLI-002**: The pipeline shall provide the sub-commands `ingest purpleair`, `ingest airnow`, `calibrate fit`, `calibrate apply`, `fuse`, `evaluate`, `db schema`, and `db rebuild`, and no others.
 - [x] **PIPE-CLI-003**: When `aqdt ingest purpleair` is invoked, the pipeline shall call `ingest_purpleair(PurpleAirSettings(), archive_uri, conn)` exactly once.
 - [x] **PIPE-CLI-004**: When `aqdt ingest airnow` is invoked, the pipeline shall resolve the window per PIPE-WIN and call `ingest_airnow(AirNowSettings(), archive_uri, start, end, conn)` exactly once with the resolved bounds.
 - [x] **PIPE-CLI-005**: When `aqdt calibrate fit` is invoked, the pipeline shall resolve `as_of` per PIPE-WIN-004 and call `fit_calibrations(archive_uri, as_of, CalibrationSettings(), conn)` exactly once.
 - [x] **PIPE-CLI-006**: When `aqdt calibrate apply` is invoked, the pipeline shall resolve the window per PIPE-WIN and call `apply_calibrations(archive_uri, start, end, CalibrationSettings(), conn)` exactly once with the resolved bounds.
 - [x] **PIPE-CLI-014**: When `aqdt fuse` is invoked, the pipeline shall resolve the window per PIPE-WIN with `default_hours=3` and call `krige_surfaces(archive_uri, start, end, FusionSettings(), conn)` exactly once with the resolved bounds.
+- [x] **PIPE-CLI-015**: When `aqdt evaluate` is invoked, the pipeline shall require `--start`, `--end`, and `--out`, build `EvaluationSettings()` overridden by any of `--mc-hours`, `--mc-draws`, `--seed` given, and call `evaluate(archive_uri, start, end, out, settings)` exactly once with `start` and `end` converted to UTC and truncated to the hour, without opening a PostGIS connection.
 - [x] **PIPE-CLI-007**: When `aqdt db schema` or `aqdt db rebuild` is invoked, the pipeline shall open the connection named by `DATABASE_URL` and call the store's `apply_schema(conn)` or `rebuild(conn, archive_uri)` respectively, failing with an error naming `DATABASE_URL` when it is unset.
 - [x] **PIPE-CLI-008**: The pipeline shall accept the global option `--archive-uri` and shall resolve the archive through the store's `resolve_archive_uri` (the option, else `AQDT_ARCHIVE_URI`) before dispatching any run, so that a run receives a concrete URI and an unset archive fails before any request or write with an error naming `AQDT_ARCHIVE_URI`.
 - [x] **PIPE-CLI-009**: The pipeline shall accept `--log-level` (default `INFO`) and configure Python `logging` to stderr at that level before any run starts.
@@ -41,12 +42,13 @@ infrastructure segment's `INFRA-SCHED`), `CFG` (configuration on runners and tes
 - [x] **PIPE-OUT-002**: When `aqdt calibrate fit` completes, the pipeline shall print a single JSON object with `as_of`, `window_start`, `window_end`, and `fits` (a mapping of status → count).
 - [x] **PIPE-OUT-003**: When `aqdt calibrate apply` completes, the pipeline shall print a single JSON object with `window_start`, `window_end`, and `rows` (the number of calibrated rows).
 - [x] **PIPE-OUT-006**: When `aqdt fuse` completes, the pipeline shall print a single JSON object with `window_start`, `window_end`, and `surfaces` (a mapping of surface status → count).
+- [x] **PIPE-OUT-007**: When `aqdt evaluate` completes, the pipeline shall print a single JSON object with `window_start`, `window_end`, `out_dir`, and `headline` (the headline metrics `evaluate` returns).
 - [x] **PIPE-OUT-004**: When a run completes without error, the pipeline shall exit with status 0; when the run raises, it shall log the exception to stderr, print nothing to stdout, and exit with a non-zero status.
 - [x] **PIPE-OUT-005**: The pipeline shall not retry a failed run; retrying is the next scheduled occurrence's job.
 
 ## PostGIS Loading
 
-- [x] **PIPE-PG-001**: When `DATABASE_URL` is set and `--no-postgis` is not given, the pipeline shall open the connection, pass it as `conn` to the run so that the run loads what it wrote into PostGIS, and close it after the run returns or raises.
+- [x] **PIPE-PG-001**: When an `ingest`, `calibrate`, or `fuse` sub-command is invoked with `DATABASE_URL` set and `--no-postgis` not given, the pipeline shall open the connection, pass it as `conn` to the run so that the run loads what it wrote into PostGIS, and close it after the run returns or raises.
 - [x] **PIPE-PG-002**: When `DATABASE_URL` is unset, or `--no-postgis` is given, the pipeline shall pass `conn=None` so that the run touches the archive only.
 - [x] **PIPE-PG-003**: If a run's archive writes succeed but its PostGIS load raises, then the pipeline shall exit non-zero (the archive is intact; `aqdt db rebuild` repairs the serving layer).
 

@@ -8,7 +8,7 @@ from pyproj import Transformer
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.fusion.grid import grid_for
-from aqdt.fusion.points import hour_points
+from aqdt.fusion.points import hour_points, hour_sensors
 from aqdt.observation_store.archive import read_partitioned, read_sites
 from aqdt.observation_store.schemas import DC_METRO, BoundingBox
 
@@ -176,3 +176,21 @@ def test_grid_follows_the_settings_bounding_box(monkeypatch):
         small.width * small.height < grid_for(DC_METRO, 500).width * grid_for(DC_METRO, 500).height
     )
     assert grid_for(settings.bbox, 500) == small  # same settings, same grid
+
+
+# @spec FUS-PTS-005
+def test_hour_sensors_are_the_rows_hour_points_merges(inputs):
+    calibrated, sites = inputs
+    sensors = hour_sensors(calibrated, sites, H10)
+    assert len(sensors) == USED_AT_10
+    assert list(sensors["site_id"]) == sorted(sensors["site_id"])
+    for column in ("site_id", "pm25_calibrated", "pm25_corrected_mean", "fit_status", "fit_as_of"):
+        assert column in sensors.columns
+    assert set(sensors["fit_status"]) == {"fitted", "pooled"}
+    lat, lon = COLOCATED_AT
+    x, y = TO_UTM.transform(lon, lat)
+    colocated = sensors[sensors["site_id"] == COLOCATED[0][0]]
+    assert colocated["x"].item() == pytest.approx(x) and colocated["y"].item() == pytest.approx(y)
+    points = hour_points(calibrated, sites, H10)
+    assert points.n_sensors == len(sensors) and points.n_points == POINTS_AT_10
+    assert len(hour_sensors(calibrated, sites, H13)) == 0

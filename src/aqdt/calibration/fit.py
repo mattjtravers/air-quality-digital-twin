@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -43,15 +44,20 @@ def ols(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
     return slope, intercept, r2, rmse
 
 
+_PAIR_COLUMNS = ["hour", "x", "y"]
+
+
 def _pairs(
     hourly: pd.DataFrame, references: dict[str, pd.Series], site_id: str, ref_site_id: str | None
-) -> tuple[np.ndarray, np.ndarray]:
-    """Hours where the sensor's ``SensorHourly`` row and the monitor's trusted value both exist."""
+) -> pd.DataFrame:
+    """Hours where the sensor's ``SensorHourly`` row and the monitor's trusted value both exist:
+    ``hour``, ``x`` (the sensor's corrected mean), ``y`` (the reference value)."""
     if ref_site_id is None or ref_site_id not in references:
-        return np.empty(0), np.empty(0)
+        return pd.DataFrame({c: pd.Series(dtype=float) for c in _PAIR_COLUMNS})
     sensor = hourly[hourly["site_id"] == site_id].set_index("hour")["pm25_corrected_mean"]
     joined = sensor.to_frame("x").join(references[ref_site_id].rename("y"), how="inner")
-    return joined["x"].to_numpy(), joined["y"].to_numpy()
+    joined.index.name = "hour"
+    return joined.reset_index()[_PAIR_COLUMNS]
 
 
 def _trusted_reference_values(monitors: pd.DataFrame) -> dict[str, pd.Series]:
@@ -63,8 +69,56 @@ def _trusted_reference_values(monitors: pd.DataFrame) -> dict[str, pd.Series]:
     }
 
 
-# @spec CAL-FIT-001, CAL-FIT-003, CAL-FIT-004, CAL-FIT-005, CAL-FIT-006, CAL-FIT-008
-# @spec CAL-FIT-009, CAL-FIT-010, CAL-MATCH-002, CAL-HOURLY-005
+@dataclass(frozen=True, eq=False)
+class CalibrationPairs:
+    """The matching and the pairs every fit of one window is computed from.
+
+    ``matches`` has one row per ``low_cost_sensor`` site (``site_id``, ``ref_site_id``,
+    ``distance_m``); ``pairs`` maps each of those sites to its pairs (``hour``, ``x``, ``y``);
+    ``accepted`` holds the sites whose per-sensor fit passes its gates; ``pooled`` is the union of
+    the accepted sites' pairs (``site_id``, ``hour``, ``x``, ``y``).
+    """
+
+    matches: pd.DataFrame
+    pairs: dict[str, pd.DataFrame]
+    accepted: set[str]
+    pooled: pd.DataFrame
+
+
+# @spec CAL-FIT-001, CAL-FIT-003, CAL-FIT-011, CAL-MATCH-002, CAL-HOURLY-005
+def calibration_pairs(
+    hourly: pd.DataFrame,
+    monitors: pd.DataFrame,
+    sites: pd.DataFrame,
+    settings: CalibrationSettings,
+) -> CalibrationPairs:
+    """Match every sensor, build its pairs, and decide which per-sensor fits are accepted: at
+    least ``min_pairs`` pairs, a non-constant input, and a positive slope."""
+    references = _trusted_reference_values(monitors)
+    matches = match_references(sites, set(references), settings.max_distance_m)
+    pairs: dict[str, pd.DataFrame] = {}
+    accepted: set[str] = set()
+    pooled: list[pd.DataFrame] = []
+    for row in matches.itertuples(index=False):
+        ref = None if pd.isna(row.ref_site_id) else row.ref_site_id
+        own = _pairs(hourly, references, row.site_id, ref)
+        pairs[row.site_id] = own
+        x = own["x"].to_numpy()
+        if len(x) >= settings.min_pairs and np.ptp(x) > 0:
+            if ols(x, own["y"].to_numpy())[0] > 0:
+                accepted.add(row.site_id)
+                pooled.append(own.assign(site_id=row.site_id))
+    columns = ["site_id", *_PAIR_COLUMNS]
+    pooled_frame = (
+        pd.concat(pooled, ignore_index=True)[columns]
+        if pooled
+        else pd.DataFrame({c: pd.Series(dtype=float) for c in columns})
+    )
+    return CalibrationPairs(matches=matches, pairs=pairs, accepted=accepted, pooled=pooled_frame)
+
+
+# @spec CAL-FIT-002, CAL-FIT-004, CAL-FIT-005, CAL-FIT-006, CAL-FIT-008
+# @spec CAL-FIT-009, CAL-FIT-010
 def fit_sensors(
     hourly: pd.DataFrame,
     monitors: pd.DataFrame,
@@ -74,33 +128,23 @@ def fit_sensors(
 ) -> list[CalibrationFit]:
     """One ``CalibrationFit`` per ``low_cost_sensor`` site for ``as_of``, sorted by ``site_id``.
 
-    A per-sensor fit is accepted when it has at least ``min_pairs`` pairs, a non-constant
-    input, and a positive slope. Every other sensor receives the pooled fit — OLS over the union
-    of accepted sensors' pairs, held to the same slope gate — or is ``uncalibrated`` when there
-    is no acceptable pooled fit. Diagnostics are recorded, never gated on.
+    Accepted sensors (``calibration_pairs``) get their own fit. Every other sensor receives the
+    pooled fit — OLS over the union of accepted sensors' pairs, held to the same slope gate — or
+    is ``uncalibrated`` when there is no acceptable pooled fit. Diagnostics are recorded, never
+    gated on.
     """
     window_start = as_of - timedelta(days=settings.window_days)
-    references = _trusted_reference_values(monitors)
-    matches = match_references(sites, set(references), settings.max_distance_m)
-
+    built = calibration_pairs(hourly, monitors, sites, settings)
+    matches = built.matches
+    own_pairs = {site_id: len(frame) for site_id, frame in built.pairs.items()}
     accepted: dict[str, tuple[float, float, float, float, int]] = {}
-    own_pairs: dict[str, int] = {}
-    pooled_x: list[np.ndarray] = []
-    pooled_y: list[np.ndarray] = []
-    for row in matches.itertuples(index=False):
-        ref = None if pd.isna(row.ref_site_id) else row.ref_site_id
-        x, y = _pairs(hourly, references, row.site_id, ref)
-        own_pairs[row.site_id] = len(x)
-        if len(x) >= settings.min_pairs and np.ptp(x) > 0:
-            slope, intercept, r2, rmse = ols(x, y)
-            if slope > 0:
-                accepted[row.site_id] = (slope, intercept, r2, rmse, len(x))
-                pooled_x.append(x)
-                pooled_y.append(y)
+    for site_id in built.accepted:
+        own = built.pairs[site_id]
+        accepted[site_id] = (*ols(own["x"].to_numpy(), own["y"].to_numpy()), len(own))
 
     pooled: tuple[float, float, float, float, int] | None = None
     if accepted:
-        x_all, y_all = np.concatenate(pooled_x), np.concatenate(pooled_y)
+        x_all, y_all = built.pooled["x"].to_numpy(), built.pooled["y"].to_numpy()
         if np.ptp(x_all) > 0:
             slope, intercept, r2, rmse = ols(x_all, y_all)
             if slope > 0:

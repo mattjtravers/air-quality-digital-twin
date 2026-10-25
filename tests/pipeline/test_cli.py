@@ -39,13 +39,14 @@ def test_console_script_and_module_alias():
 
 
 # @spec PIPE-CLI-002
-def test_exactly_the_seven_sub_commands(env, stubs):
+def test_exactly_the_eight_sub_commands(env, stubs, tmp_path):
     for argv in (
         ["ingest", "purpleair"],
         ["ingest", "airnow"],
         ["calibrate", "fit"],
         ["calibrate", "apply"],
         ["fuse"],
+        ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", str(tmp_path)],
     ):
         assert run(argv) == 0
     for argv in (
@@ -363,3 +364,48 @@ def test_load_failure_after_archive_write_is_non_zero_and_closes(env, stubs, mon
 def test_no_configuration_files_are_read():
     source = "\n".join(p.read_text() for p in PACKAGE.rglob("*.py"))
     assert "env_file" not in source and "dotenv" not in source
+
+
+# @spec PIPE-CLI-015
+def test_evaluate_dispatch_requires_its_window_and_output(env, stubs, monkeypatch, tmp_path):
+    from aqdt.evaluation.schemas import EvaluationSettings
+
+    for name in ("AQDT_EVAL_MC_HOURS", "AQDT_EVAL_MC_DRAWS", "AQDT_EVAL_SEED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    argv = ["evaluate", "--start", "2026-09-20T10:30", "--end", "2026-09-21T00:00"]
+    assert run([*argv, "--out", str(tmp_path), "--mc-draws", "7", "--seed", "3"]) == 0
+    call = stubs.only("evaluate")
+    archive_uri, start, end, out, settings = call.args[:5]
+    assert archive_uri == ARCHIVE
+    assert start == datetime(2026, 9, 20, 10, tzinfo=UTC)
+    assert end == datetime(2026, 9, 21, 0, tzinfo=UTC)
+    assert str(out) == str(tmp_path)
+    assert isinstance(settings, EvaluationSettings)
+    assert (settings.mc_hours, settings.mc_draws, settings.seed) == (24, 7, 3)
+    assert not [c for c in stubs.calls if c.name == "connect"]
+    for missing in (argv, ["evaluate", "--out", str(tmp_path)]):
+        with pytest.raises(SystemExit) as exc:
+            run(missing)
+        assert exc.value.code == 2
+
+
+# @spec PIPE-OUT-007
+def test_evaluate_prints_window_output_and_headline(env, stubs, capsys, tmp_path):
+    argv = [
+        "evaluate",
+        "--start",
+        "2026-09-20T10",
+        "--end",
+        "2026-09-20T12",
+        "--out",
+        str(tmp_path),
+    ]
+    assert run(argv) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {
+        "window_start": "2026-09-20T10:00:00Z",
+        "window_end": "2026-09-20T12:00:00Z",
+        "out_dir": str(tmp_path),
+        "headline": {"n": 3, "bias": 0.5},
+    }

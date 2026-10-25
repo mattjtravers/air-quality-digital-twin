@@ -45,6 +45,12 @@ sub-command per run plus the serving-layer maintenance commands:
 | `aqdt fuse [--start T --end T \| --hours N]` | `krige_surfaces` | trailing 3 h: `[now_h − 3 h, now_h)` |
 | `aqdt db schema` | `apply_schema` | — |
 | `aqdt db rebuild` | `rebuild` | — |
+| `aqdt evaluate --start T --end T --out DIR [--mc-hours N] [--mc-draws N] [--seed N]` | `evaluate` | none: the window is required |
+
+`aqdt evaluate` is on demand only: it has no routine window, no workflow, and no schedule, opens no
+PostGIS connection (evaluation reads the archive and writes a report directory), and its options
+override the matching `EvaluationSettings` values. It needs the `analysis` dependency group;
+without it the command fails naming the group.
 
 `now_h` is the current UTC time truncated to the hour, so the hour in progress is never
 requested: an AirNow hour is published after it ends, and a PurpleAir hour's snapshots are still
@@ -67,7 +73,8 @@ archived while it was idle.
 
 **Output.** Each run prints one JSON object to stdout on completion — an ingester's
 `IngestSummary`, a fit run's count of fits by status, an apply run's row count and window, a
-fuse run's window and count of surfaces by status — so
+fuse run's window and count of surfaces by status, an evaluate run's window, report directory, and
+headline metrics — so
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
 `logging` at `--log-level`, including the resolved window before the run starts. The HTTP
 client's own loggers (`httpx`, `httpcore`) stay at `WARNING` at every level: they log each

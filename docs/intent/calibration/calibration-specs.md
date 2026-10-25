@@ -45,6 +45,7 @@ hourly values), `STORE` (product schemas, archive layout, PostGIS tables), `RUN`
 - [x] **CAL-FIT-008**: When recording any fit, calibration shall set `window_start = as_of − window_days` and `window_end = as_of` (half-open window).
 - [x] **CAL-FIT-009**: Calibration shall not gate acceptance on `r2` or `rmse`; they are recorded as diagnostics only.
 - [x] **CAL-FIT-010**: When fitting, calibration shall produce exactly one `CalibrationFit` row per `(site_id, as_of)` for every `low_cost_sensor` site (CAL-MATCH-001), with `status` one of `fitted`, `pooled`, `uncalibrated`.
+- [x] **CAL-FIT-011**: Calibration shall expose `calibration_pairs(hourly, monitors, sites, settings) -> CalibrationPairs`, returning for every `low_cost_sensor` site its match (CAL-MATCH) and its pairs (hour, `pm25_corrected_mean`, reference `pm25_raw`) as CAL-FIT-001 defines them, the set of sensors whose per-sensor fit CAL-FIT-003 accepts, and the pooled pairs of CAL-FIT-004 each tagged with its sensor and hour; and `fit_sensors` shall compute its fits from `calibration_pairs`.
 
 ## Applying
 

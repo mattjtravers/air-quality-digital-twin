@@ -24,6 +24,7 @@ resolution benchmark).
 - [x] **FUS-PTS-002**: When two or more of an hour's sensors have projected coordinates that are equal after rounding each coordinate to the nearest metre, fusion shall merge them into one point at the rounded coordinates whose value is the arithmetic mean of their `pm25_calibrated`.
 - [x] **FUS-PTS-003**: When building an hour's points, fusion shall set `n_sensors` to the number of rows used (after FUS-IN-002 and FUS-IN-004) and `n_points` to the number of distinct points after merging (FUS-PTS-002).
 - [x] **FUS-PTS-004**: Fusion shall use a sensor as a kriging point whether or not its site lies inside the grid's extent.
+- [x] **FUS-PTS-005**: Fusion shall expose `hour_sensors(calibrated, sites, hour)`, returning the rows selected for hour `H` by FUS-IN-002 and FUS-IN-004 with their `site_id`, `pm25_calibrated`, `pm25_corrected_mean`, `fit_status`, `fit_as_of`, and EPSG:26918 coordinates `x`, `y`, sorted by `site_id`; and `hour_points` shall build its points from `hour_sensors`.
 
 ## Grid
 

@@ -34,6 +34,10 @@ build-backend = "hatchling.build"
 packages = ["src/aqdt"]
 
 [dependency-groups]
+analysis = [
+    "matplotlib>=3.11.2",
+    "scikit-learn>=1.9.1",
+]
 dev = [
     "aws-sam-cli>=1.148.0",
     "boto3>=1.43.75",

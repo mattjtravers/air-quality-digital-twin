@@ -8,20 +8,23 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-The HLD (`docs/high-level-design.md`) and six leaf LLDs under `docs/intent/` —
+The HLD (`docs/high-level-design.md`) and nine leaf LLDs under `docs/intent/` —
 `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), `calibration`
-(`CAL`), `pipeline` (`PIPE`), and `infrastructure` (`INFRA`) — are drafted with EARS specs and
-tests beside each, and all six segments are implemented: five under `src/aqdt/`
-(`observation_store/`, `purpleair/`, `airnow/`, `calibration/`, `pipeline/`, plus `registry.py`
+(`CAL`), `fusion` (`FUS`), `evaluation` (`EVAL`), `maps` (`MAP`), `pipeline` (`PIPE`), and
+`infrastructure` (`INFRA`) — are drafted with EARS specs and tests beside each, and all nine
+segments are implemented: eight under `src/aqdt/` (`observation_store/`, `purpleair/`,
+`airnow/`, `calibration/`, `fusion/`, `evaluation/`, `maps/`, `pipeline/`, plus `registry.py`
 listing every archive product in load order) and the infrastructure as SAM templates and the
 dispatch Lambda under `infra/`, with `samconfig.toml` and `bin/schedules.sh`.
 The `[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read
 the HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
 schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
 Every run is invoked through the `aqdt` CLI (`aqdt ingest purpleair|airnow`, `aqdt calibrate
-fit|apply`, `aqdt db schema|rebuild`); the four `.github/workflows/{ingest-*,calibrate-*}.yaml`
-workflows invoke it and declare `workflow_dispatch` as their only trigger. AWS EventBridge
-Scheduler dispatches them on a schedule through a small Lambda; scheduled runs are switched on
+fit|apply`, `aqdt fuse`, `aqdt evaluate`, `aqdt db schema|rebuild`); the five
+`.github/workflows/{ingest-*,calibrate-*,fuse}.yaml` workflows invoke it and declare
+`workflow_dispatch` as their only trigger. `aqdt evaluate` is on demand only (no workflow) and
+needs the `analysis` dependency group (`uv sync --all-groups` installs it). AWS EventBridge
+Scheduler dispatches the workflows on a schedule through a small Lambda; scheduled runs are switched on
 and off with `bin/schedules.sh on|off|status`.
 
 Key architectural facts to keep in mind (rationale in the HLD):

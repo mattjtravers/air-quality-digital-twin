@@ -14,6 +14,7 @@ import sys
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from aqdt.airnow.ingest import ingest_airnow
@@ -52,6 +53,26 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {value}")
+    return value
+
+
+def evaluate(*args: Any, **kwargs: Any) -> Any:
+    """``aqdt.evaluation.run.evaluate``, imported on use: it needs the ``analysis`` dependency
+    group, which scheduled runs do not install."""
+    try:
+        from aqdt.evaluation.run import evaluate as run
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            f"aqdt evaluate needs the 'analysis' dependency group ({error.name} is missing); "
+            "install it with: uv sync --group analysis"
+        ) from error
+    return run(*args, **kwargs)
+
+
 def _add_window_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", type=_timestamp, help="window start (ISO 8601, UTC if naive)")
     parser.add_argument("--end", type=_timestamp, help="window end, exclusive")
@@ -88,6 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
     fuse = commands.add_parser("fuse", help="krige hourly PM2.5 surfaces in a window")
     _add_window_options(fuse)
 
+    evaluate_ = commands.add_parser(
+        "evaluate", help="score stored surfaces against held-out monitors (on demand)"
+    )
+    evaluate_.add_argument("--start", type=_timestamp, required=True, help="window start")
+    evaluate_.add_argument("--end", type=_timestamp, required=True, help="window end, exclusive")
+    evaluate_.add_argument("--out", type=Path, required=True, help="report directory")
+    evaluate_.add_argument("--mc-hours", type=_positive_int, help="Monte Carlo hours")
+    evaluate_.add_argument("--mc-draws", type=_positive_int, help="Monte Carlo draws per hour")
+    evaluate_.add_argument("--seed", type=_non_negative_int, help="random seed")
+
     db = commands.add_parser("db", help="PostGIS serving layer")
     actions = db.add_subparsers(dest="action", required=True)
     actions.add_parser("schema", help="create the tables")
@@ -101,7 +132,7 @@ def _check_window_options(parser: argparse.ArgumentParser, args: argparse.Namesp
         return
     if (args.start is None) != (args.end is None):
         parser.error("--start and --end must be given together")
-    if args.hours is not None and args.start is not None:
+    if getattr(args, "hours", None) is not None and args.start is not None:
         parser.error("--hours cannot be combined with --start/--end")
 
 
@@ -154,6 +185,7 @@ class _Connection:
 
 # @spec PIPE-CLI-003, PIPE-CLI-004, PIPE-CLI-005, PIPE-CLI-006, PIPE-CLI-007, PIPE-CLI-010
 # @spec PIPE-CLI-014, PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003, PIPE-OUT-006
+# @spec PIPE-CLI-015, PIPE-OUT-007
 def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict[str, Any] | None:
     """Run the requested command and return what to print (``None`` for the db commands)."""
     if args.command == "db":
@@ -193,6 +225,29 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             "window_start": _iso(as_of - timedelta(days=settings.window_days)),
             "window_end": _iso(as_of),
             "fits": {status.value: counts.get(status, 0) for status in FitStatus},
+        }
+
+    if args.command == "evaluate":
+        from aqdt.evaluation.schemas import EvaluationSettings
+
+        overrides = {
+            name: value
+            for name, value in (
+                ("mc_hours", args.mc_hours),
+                ("mc_draws", args.mc_draws),
+                ("seed", args.seed),
+            )
+            if value is not None
+        }
+        settings = EvaluationSettings(**overrides)
+        start, end = resolve_window(now, args.start, args.end, None)
+        log.info("evaluate window [%s, %s)", _iso(start), _iso(end))
+        summary = evaluate(archive_uri, start, end, args.out, settings)
+        return {
+            "window_start": _iso(start),
+            "window_end": _iso(end),
+            "out_dir": str(args.out),
+            "headline": summary.headline,
         }
 
     if args.command == "fuse":

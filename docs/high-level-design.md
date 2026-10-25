@@ -38,8 +38,9 @@ The twin is a pipeline of data assets, each derived from the ones before it:
 6. **Evaluation** scores the surface against held-out reference monitors.
 
 Layers 1–3 are implemented for PurpleAir and AirNow, together with the scheduled runs that feed
-them. Layer 4 has its own leaf design, beginning with ordinary kriging. Layers 5–6 are designed at
-this level only so that the earlier layers do not foreclose them.
+them. Layer 4 has its own leaf design, beginning with ordinary kriging. Layer 6 has its own leaf
+design, an on-demand assessment of the stored surfaces and their uncertainty. Layer 5 is designed
+at this level only so that the earlier layers do not foreclose it.
 
 ### Idempotent, time-windowed batch
 
@@ -113,8 +114,10 @@ standard GIS and scientific tooling (QGIS, GeoPandas, xarray) without this proje
 - **No gridded data in PostGIS.** Fused surfaces are stored as Cloud-Optimized GeoTIFFs and HRRR
   fields as CF-convention NetCDF/Zarr, both in the archive; PostGIS holds point observations, site
   metadata, and per-surface metadata only.
-- **No user-facing application.** Outputs are data assets consumable by QGIS, notebooks, and
-  downstream stages.
+- **No application server.** The one user-facing view is a static HTML dashboard on GitHub Pages:
+  pre-rendered pages and images with no backend, no database behind them, and no request-time
+  computation. Everything else is a data asset consumable by QGIS, notebooks, and downstream
+  stages.
 
 ## Tenets
 
@@ -170,10 +173,16 @@ flowchart LR
         FUS[Fusion<br/>hourly kriged surface + variance]
     end
 
+    subgraph evaluation [Evaluation — on demand]
+        EVL[Evaluation<br/>held-out monitors,<br/>error budget]
+        MAP[Maps<br/>surface rendering]
+        RPT[/report directory<br/>tables + figures/]
+    end
+
     subgraph future [Later increments]
         TRN[Transport<br/>HRRR-driven]
-        EVL[Evaluation<br/>held-out monitors]
         ZR[(Zarr / NetCDF<br/>gridded fields)]
+        DSH[Dashboard<br/>static HTML, GitHub Pages]
     end
 
     LAM -.->|workflow_dispatch API| SCH
@@ -186,7 +195,9 @@ flowchart LR
     ARC -->|load| PG
     ARC --> CAL --> ARC
     ARC --> FUS --> ARC
-    FUS --> EVL
+    ARC --> EVL --> RPT
+    MAP --> EVL
+    MAP --> DSH
     HR --> ZR --> TRN
 ```
 
@@ -228,9 +239,26 @@ Each hour's surface is written to the archive as a raster; each hour's variogram
 back through the store's primitives, so PostGIS serves which hours have surfaces and how they were
 fitted while the cells themselves stay in the raster.
 
-**Transport, evaluation** — later increments, each a separate component following the same
-pattern: read from the archive, write products back to it. Named here so the store's schema is
-designed for them.
+**Evaluation.** Scores the stored hourly surfaces against the AirNow monitors fusion never saw,
+over any window of hours, and accounts for the surface's uncertainty: it adds the uncertainty the
+calibration fits carry to the kriging variance, checks that total against a Monte Carlo
+propagation, and tabulates every known error source as an error budget. It is run on demand, not
+on a schedule, reads the archive only, and writes its tables, figures, and summary to a report
+directory outside the archive: an assessment of the pipeline's products, not a product the
+pipeline serves.
+
+**Maps.** The one renderer for map figures of a surface — estimate or uncertainty — on fixed,
+perceptually uniform colour scales, with sensors and monitors overlaid, so every map of every hour
+reads on the same scale and the dashboard draws them exactly as the evaluation figures do. It owns
+no data and no pipeline step.
+
+**Dashboard** — a later increment: a static HTML site, published on GitHub Pages, presenting the
+hourly surfaces as maps drawn by Maps, alongside the evaluation's scores. It is generated ahead of
+time from the archive and holds no state of its own, so it can be regenerated at any time like
+every other derived artifact.
+
+**Transport** — a later increment, a separate component following the same pattern: read from the
+archive, write products back to it. Named here so the store's schema is designed for it.
 
 ### Data flow per run
 
@@ -300,8 +328,10 @@ EARS prefix.
 | `pipeline` | `PIPE` | the command-line entry point, routine windows, and the cadence each scheduled run follows |
 | `infrastructure` | `INFRA` | the SAM stacks, the dispatch Lambda, and every AWS resource the twin depends on |
 | `fusion` | `FUS` | per-hour variogram fits, the kriged PM2.5 surface and its variance on a fixed grid |
+| `evaluation` | `EVAL` | scoring surfaces at held-out monitors, total uncertainty, the error budget, the evaluation report |
+| `maps` | `MAP` | the shared surface renderer, its fixed colour scales and markers |
 
-Later increments add leaves (`transport`, `evaluation`) beside these.
+Later increments add `dashboard` and `transport` leaves beside these.
 
 ## Key Design Decisions
 
@@ -465,9 +495,18 @@ support is a poor fit for time-stepped model output.
 - A scheduled fusion run completes well within its workflow timeout on a GitHub Actions runner at
   the chosen grid resolution, with memory bounded independently of grid size.
 
-**Later increments:** the fused surface scored against the AirNow monitors it does not use, and by
-leave-one-out cross-validation over the sensors, reported against FAIRMODE model-quality
-objectives.
+**Evaluation:**
+
+- One command scores every stored surface in a window against the AirNow monitors it does not
+  use, and reports how many hours and days were available and which were missing.
+- The fraction of held-out monitor-hours within ±2 SD of the surface is reported for the kriging
+  variance alone and for the total variance; a total-variance coverage far from 95% is the signal
+  that the uncertainty model is wrong.
+- Every error source the pipeline knows of appears in the error budget, stating whether it is
+  quantified and included, quantified for diagnosis only, or listed and not modeled.
+
+**Later increments:** leave-one-out cross-validation over the sensors, reported against FAIRMODE
+model-quality objectives.
 
 ## References
 

@@ -111,6 +111,12 @@ directly.
 
 - `fit_calibrations(archive_uri, as_of, settings, conn=None) -> list[CalibrationFit]` —
   aggregate the fitting window and write its `SensorHourly` rows, match, fit, write fits.
+- `calibration_pairs(hourly, monitors, sites, settings) -> CalibrationPairs` — the matching and
+  the pairs a fit is computed from, without fitting: for every `low_cost_sensor` site its match
+  and its pairs (hour, sensor value, reference value), which sensors' fits are accepted, and the
+  pooled pairs (the union of accepted sensors' pairs, each tagged with its sensor and hour).
+  Fitting is OLS over these pairs, so a consumer that needs more than the recorded diagnostics —
+  evaluation's parameter covariance — rebuilds exactly the pairs a fit used.
 - `apply_calibrations(archive_uri, start, end, settings, conn=None) -> frame` — aggregate the
   half-open window `[start, end)` and write its `SensorHourly` rows, apply the applicable fits,
   write `CalibratedHourly`.
@@ -166,7 +172,7 @@ src/aqdt/calibration/
   products.py   # the three Product definitions
   hourly.py     # aggregate_hourly
   matching.py   # match_references
-  fit.py        # fit_calibrations
+  fit.py        # calibration_pairs, fit_calibrations
   apply.py      # apply_calibrations
   sql/          # sensor_hourly, calibration_fits, calibrated_hourly tables
 tests/calibration/

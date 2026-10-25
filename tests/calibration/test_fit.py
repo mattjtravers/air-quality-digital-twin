@@ -271,3 +271,36 @@ def test_empty_window_writes_every_sensor_as_uncalibrated(archive_uri, settings)
     assert {f.status for f in fits} == {FitStatus.uncalibrated}
     stored = read_partitioned(archive_uri, FITS, as_of="2020-01-01T00")
     assert len(stored) == len(SENSORS)
+
+
+# --- The pairs on their own ---------------------------------------------------
+
+
+# @spec CAL-FIT-011
+def test_calibration_pairs_are_the_pairs_the_fits_use(archive_uri, settings, fits):
+    from aqdt.calibration.fit import calibration_pairs
+    from aqdt.calibration.hourly import aggregate_hourly
+    from aqdt.observation_store.archive import read_observations, read_sites
+    from aqdt.observation_store.schemas import Source
+
+    start = AS_OF - timedelta(days=settings.window_days)
+    hourly = aggregate_hourly(read_observations(archive_uri, Source.purpleair, start, AS_OF))
+    monitors = read_observations(archive_uri, Source.airnow, start, AS_OF)
+    pairs = calibration_pairs(hourly, monitors, read_sites(archive_uri), settings)
+
+    assert set(pairs.matches["site_id"]) == set(SENSORS)
+    accepted = {s for s, f in fits.items() if f.status == FitStatus.fitted}
+    assert pairs.accepted == accepted
+    for site_id, fit in fits.items():
+        own = pairs.pairs[site_id]
+        assert list(own.columns) == ["hour", "x", "y"]
+        if fit.status == FitStatus.fitted:
+            assert len(own) == fit.n_pairs
+            slope, intercept, *_ = fit_module.ols(own["x"], own["y"])
+            assert (slope, intercept) == pytest.approx((fit.slope, fit.intercept))
+    pooled_fit = next(f for f in fits.values() if f.status == FitStatus.pooled)
+    assert len(pairs.pooled) == pooled_fit.n_pairs
+    assert set(pairs.pooled["site_id"]) == accepted
+    assert list(pairs.pooled.columns) == ["site_id", "hour", "x", "y"]
+    slope, intercept, *_ = fit_module.ols(pairs.pooled["x"], pairs.pooled["y"])
+    assert (slope, intercept) == pytest.approx((pooled_fit.slope, pooled_fit.intercept))
