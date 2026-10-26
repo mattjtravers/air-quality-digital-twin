@@ -41,7 +41,7 @@ ROWS = [
     (DILUTION, "calibration", "systematic-shared", "listed-not-modeled", "not quantified"),
     (KRIGING, "fusion", "random", "quantified-included", "not quantified"),
     (VARIOGRAM, "fusion", "systematic-shared", "quantified-diagnostic", "not quantified"),
-    (DEPENDENCE, "evaluation", "systematic-shared", "listed-not-modeled", "not quantified"),
+    (DEPENDENCE, "evaluation", "systematic-shared", "quantified-diagnostic", "not quantified"),
 ]
 COLUMNS = ["source", "stage", "type", "handling", "magnitude"]
 

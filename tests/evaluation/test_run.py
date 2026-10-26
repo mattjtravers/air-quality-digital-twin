@@ -13,6 +13,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from aqdt.calibration.products import FITS
+from aqdt.evaluation import budget
 from aqdt.evaluation import run as run_module
 from aqdt.evaluation.run import evaluate
 from aqdt.fusion.products import SURFACE_FITS
@@ -37,6 +38,8 @@ FILES = [
     "availability.csv",
     "fit_uncertainty.csv",
     "montecarlo.csv",
+    "lomo.csv",
+    "baselines.csv",
     "decomposition.csv",
     "variogram_sensitivity.csv",
     "error_budget.csv",
@@ -227,6 +230,8 @@ def test_a_window_with_no_kriged_hour_still_writes_a_report(archive, tmp_path, c
     assert len(_csv((tmp_path,), "matchups.csv")) == 0
     assert "no hour was kriged" in (tmp_path / "summary.md").read_text().lower()
     assert not (tmp_path / "maps_pm25.png").exists()
+    for name in ("lomo.csv", "baselines.csv"):
+        assert len(_csv((tmp_path,), name)) == 0, name
 
 
 # --- Calibration uncertainty ------------------------------------------------------------------
@@ -358,6 +363,10 @@ def test_report_files_and_summary_contents(report):
         "variogram uncertainty",
         "unflagged",
         "monte carlo",
+        "leave one monitor out",
+        "baselines",
+        "idw",
+        "random forest",
     ):
         assert phrase in text, phrase
 
@@ -371,3 +380,99 @@ def test_run_json_records_provenance(report, archive):
         meta
     )
     assert "git_commit" in meta
+
+
+# --- Leave one monitor out --------------------------------------------------------------------
+
+LOMO_COLUMNS = [
+    "hour",
+    "site_id",
+    "obs",
+    "flagged",
+    "stored_error",
+    "control_error",
+    "lomo_error",
+    "n_fitted_to_x",
+    "n_changed",
+]
+
+
+@pytest.fixture(scope="module")
+def lomo_rows(report):
+    frame = _csv(report, "lomo.csv")
+    frame["hour"] = pd.to_datetime(frame["hour"], utc=True)
+    return frame
+
+
+# @spec EVAL-LOMO-001, EVAL-LOMO-002, EVAL-LOMO-004
+def test_lomo_has_one_row_per_selected_hour_and_matchup_monitor(lomo_rows, matchups):
+    assert list(lomo_rows.columns) == LOMO_COLUMNS
+    assert lomo_rows["hour"].nunique() == 2  # lomo_hours = 2 in eval_settings
+    expected = matchups[matchups["hour"].isin(set(lomo_rows["hour"]))]
+    assert sorted(zip(lomo_rows["hour"], lomo_rows["site_id"])) == sorted(
+        zip(expected["hour"], expected["site_id"])
+    )
+    merged = lomo_rows.merge(matchups, on=["hour", "site_id"], suffixes=("", "_m"))
+    assert merged["stored_error"].to_numpy() == pytest.approx(merged["error"].to_numpy())
+    assert (merged["flagged"] == merged["flagged_m"]).all()
+
+
+# @spec EVAL-LOMO-002, EVAL-LOMO-003
+def test_the_control_reproduces_the_stored_surface(lomo_rows):
+    # unchanged archive: the control refit is the stored fit; only point vs cell and the
+    # variogram refit separate the control from the stored surface
+    assert lomo_rows["control_error"].notna().all()
+    gap = (lomo_rows["control_error"] - lomo_rows["stored_error"]).abs()
+    assert gap.max() < 1.0
+
+
+# @spec EVAL-LOMO-002, EVAL-LOMO-004
+def test_removing_a_monitor_moves_the_sensors_fitted_to_it(archive, lomo_rows):
+    fits = read_partitioned(archive, FITS)
+    fitted = fits[fits["status"] == "fitted"]
+    for row in lomo_rows.itertuples():
+        assert row.n_fitted_to_x == (fitted["ref_site_id"] == row.site_id).sum()
+        assert row.n_changed >= row.n_fitted_to_x
+        if row.n_fitted_to_x == 0:
+            assert row.lomo_error == pytest.approx(row.control_error)
+    assert lomo_rows["n_fitted_to_x"].sum() > 0
+    moved = lomo_rows[lomo_rows["n_fitted_to_x"] > 0]
+    assert (moved["lomo_error"] != moved["control_error"]).any()
+
+
+# @spec EVAL-LOMO-001, EVAL-BUDGET-003
+def test_lomo_hours_zero_skips_it_and_leaves_its_budget_row_unquantified(
+    archive, tmp_path, cal_env
+):
+    evaluate(archive, *EVAL_WINDOW, tmp_path, eval_settings(lomo_hours=0))
+    table = _csv((tmp_path,), "lomo.csv")
+    assert list(table.columns) == LOMO_COLUMNS and len(table) == 0
+    budget_rows = _csv((tmp_path,), "error_budget.csv").set_index("source")
+    assert budget_rows.loc[budget.DEPENDENCE, "magnitude"] == "not quantified"
+
+
+# @spec EVAL-BUDGET-002, EVAL-BUDGET-003, EVAL-LOMO-004
+def test_the_dependence_row_carries_the_lomo_median(report):
+    budget_rows = _csv(report, "error_budget.csv").set_index("source")
+    row = budget_rows.loc[budget.DEPENDENCE]
+    assert row["handling"] == "quantified-diagnostic"
+    assert "µg/m³" in row["magnitude"] and "lomo.csv" in row["magnitude"]
+
+
+# --- Baselines --------------------------------------------------------------------------------
+
+
+# @spec EVAL-BASE-001, EVAL-BASE-002, EVAL-BASE-003
+def test_baselines_are_matchup_columns_and_a_comparison_table(report, matchups):
+    assert matchups["idw"].notna().all() and matchups["rf"].notna().all()
+    assert ((matchups["idw"] - matchups["obs"]).abs() < 10).all()
+    table = _csv(report, "baselines.csv").set_index(["method", "subset"])
+    assert set(table.index) == {
+        (m, s) for m in ("kriging", "idw", "rf") for s in ("unflagged", "all")
+    }
+    headline = _csv(report, "metrics.csv")
+    overall = headline[(headline["subset"] == "unflagged") & (headline["split"] == "overall")]
+    kriging = table.loc[("kriging", "unflagged")]
+    assert kriging["n"] == overall["n"].iloc[0]
+    assert kriging["rmse"] == pytest.approx(overall["rmse"].iloc[0])
+    assert table.loc[("idw", "all"), "n"] == len(matchups)

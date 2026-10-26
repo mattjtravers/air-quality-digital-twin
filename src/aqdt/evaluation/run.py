@@ -18,7 +18,7 @@ from pyproj import Transformer
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.calibration.schemas import CalibrationSettings, hour_bound
-from aqdt.evaluation import budget, figures, report
+from aqdt.evaluation import baselines, budget, figures, lomo, report
 from aqdt.evaluation.calse import POOLED, rebuild_fits
 from aqdt.evaluation.decompose import REFERENCE_SD, detector_term, split_residual
 from aqdt.evaluation.matchups import cell_index
@@ -36,6 +36,7 @@ from aqdt.evaluation.totvar import (
 from aqdt.fusion.grid import CRS, Grid
 from aqdt.fusion.points import HourPoints, hour_points, hour_sensors
 from aqdt.fusion.products import SURFACE_FITS
+from aqdt.fusion.schemas import FusionSettings
 from aqdt.maps.render import Panel, save_figure, small_multiples
 from aqdt.maps.settings import MapSettings
 from aqdt.maps.surface import SurfaceArrays, read_surface
@@ -74,6 +75,8 @@ MATCHUP_COLUMNS = [
     "total_sd",
     "z_total",
     "inputs_reproduced",
+    "idw",
+    "rf",
 ]
 
 
@@ -297,6 +300,31 @@ def _monte_carlo(contexts, matchups, rebuilt, stored_by_key, settings) -> pd.Dat
 
 
 # @spec EVAL-DECOMP-001, EVAL-DECOMP-002, EVAL-DECOMP-003
+# @spec EVAL-BASE-001, EVAL-BASE-002
+def _baselines(contexts, matchups, monitor_sites, settings) -> None:
+    """Fill the matchups' ``idw`` and ``rf`` columns from the hours' rebuilt kriging points."""
+    if not len(matchups):
+        return
+    points = pd.concat(
+        [
+            pd.DataFrame({"hour": c.hour, "x": c.points.x, "y": c.points.y, "z": c.points.z})
+            for c in contexts
+            if c.points.n_points
+        ],
+        ignore_index=True,
+    )
+    by_hour = {c.hour: c.points for c in contexts}
+    located = matchups[["hour", "site_id"]].merge(
+        monitor_sites[["site_id", "x", "y"]], on="site_id", how="left"
+    )
+    matchups["idw"] = [
+        baselines.idw(by_hour[h].x, by_hour[h].y, by_hour[h].z, x, y)
+        for h, x, y in zip(located["hour"], located["x"], located["y"])
+    ]
+    model = baselines.fit_forest(points, settings.seed)
+    matchups["rf"] = baselines.predict_forest(model, points, located)
+
+
 def _decomposition(rebuilt, stored_by_key) -> pd.DataFrame:
     fits = []
     for (site_id, as_of), cov in rebuilt.covariances.items():
@@ -481,6 +509,7 @@ def _magnitudes(
     stored,
     observations,
     availability,
+    lomo_stats,
 ) -> dict:
     out: dict[str, str] = {}
     table = rebuilt.table
@@ -521,11 +550,14 @@ def _magnitudes(
     if len(observations):
         rate = observations["qc_flags"].map(len).gt(0).mean()
         out[budget.AIRNOW_DATA] = f"{100 * rate:.1f}% of monitor-hours in the window flagged"
-    targets = availability["calibration_targets"].sum() if len(availability) else 0
-    if targets:
+    if lomo_stats["n"]:
+        targets = availability["calibration_targets"].sum() if len(availability) else 0
         out[budget.DEPENDENCE] = (
-            f"{int(targets)} kriging-input sensors calibrated against a scored monitor; median "
-            f"distance {availability['median_target_distance_m'].median() / 1000:.1f} km "
+            f"median |error without the monitor| − |control error| "
+            f"{lomo_stats['median_difference']:+.2f} µg/m³ over {lomo_stats['n']} unflagged "
+            f"monitor-hours (lomo.csv); {int(targets)} kriging-input sensors calibrated against "
+            f"a scored monitor, median distance "
+            f"{availability['median_target_distance_m'].median() / 1000:.1f} km "
             "(availability.csv)"
         )
     slopes = (
@@ -541,7 +573,7 @@ def _magnitudes(
 
 # @spec EVAL-IN-001, EVAL-IN-002, EVAL-IN-003, EVAL-MATCH-001, EVAL-MATCH-003, EVAL-MATCH-004
 # @spec EVAL-MATCH-005, EVAL-MATCH-006, EVAL-AVAIL-001, EVAL-AVAIL-002, EVAL-AVAIL-003
-# @spec EVAL-AVAIL-004, EVAL-FIG-001, EVAL-FIG-005, EVAL-RUN-001, EVAL-RUN-004
+# @spec EVAL-AVAIL-004, EVAL-FIG-001, EVAL-FIG-005, EVAL-RUN-001, EVAL-RUN-004, EVAL-BASE-003
 def evaluate(
     archive_uri: str | None,
     start: datetime,
@@ -646,6 +678,27 @@ def evaluate(
         columns=["hour", "selected", "alternative", "rms_difference"],
     )
     mc = _monte_carlo(contexts, matchups, rebuilt, stored_by_key, settings)
+    _baselines(contexts, matchups, monitor_sites, settings)
+    baseline_table = (
+        baselines.baseline_table(matchups)
+        if len(matchups)
+        else pd.DataFrame(columns=baselines.COLUMNS)
+    )
+    lomo_table = (
+        lomo.leave_one_monitor_out(
+            archive_uri,
+            contexts,
+            matchups,
+            calibrated,
+            sites,
+            calibration_settings,
+            FusionSettings().min_points,
+            settings,
+        )
+        if len(matchups)
+        else pd.DataFrame(columns=lomo.COLUMNS)
+    )
+    lomo_stats = lomo.lomo_statistics(lomo_table)
     decomposition = _decomposition(rebuilt, stored_by_key)
 
     def inside(x: float, y: float):
@@ -673,6 +726,7 @@ def evaluate(
         if len(kriged)
         else observations,
         availability,
+        lomo_stats,
     )
     error_budget = budget.error_budget(magnitudes)
 
@@ -681,6 +735,8 @@ def evaluate(
     availability.to_csv(out / "availability.csv", index=False)
     rebuilt.table.to_csv(out / "fit_uncertainty.csv", index=False)
     mc.to_csv(out / "montecarlo.csv", index=False)
+    lomo_table.to_csv(out / "lomo.csv", index=False)
+    baseline_table.to_csv(out / "baselines.csv", index=False)
     decomposition.to_csv(out / "decomposition.csv", index=False)
     sensitivity.to_csv(out / "variogram_sensitivity.csv", index=False)
     error_budget.to_csv(out / "error_budget.csv", index=False)
@@ -716,6 +772,9 @@ def evaluate(
         "matchups": matchups,
         "availability": availability,
         "montecarlo": mc,
+        "lomo": lomo_stats,
+        "lomo_hours": lomo_table["hour"].nunique() if len(lomo_table) else 0,
+        "baselines": baseline_table,
         "decomposition": decomposition,
         "sensitivity": sensitivity,
         "fit_table": rebuilt.table,

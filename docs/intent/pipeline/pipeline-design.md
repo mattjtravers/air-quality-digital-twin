@@ -45,7 +45,7 @@ sub-command per run plus the serving-layer maintenance commands:
 | `aqdt fuse [--start T --end T \| --hours N]` | `krige_surfaces` | trailing 3 h: `[now_h − 3 h, now_h)` |
 | `aqdt db schema` | `apply_schema` | — |
 | `aqdt db rebuild` | `rebuild` | — |
-| `aqdt evaluate --start T --end T --out DIR [--mc-hours N] [--mc-draws N] [--seed N]` | `evaluate` | none: the window is required |
+| `aqdt evaluate --start T --end T --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]` | `evaluate` | none: the window is required |
 
 `aqdt evaluate` is on demand only: it has no routine window, no workflow, and no schedule, opens no
 PostGIS connection (evaluation reads the archive and writes a report directory), and its options

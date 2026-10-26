@@ -17,6 +17,7 @@ class EvaluationSettings(BaseSettings):
 
     mc_hours: int = Field(default=24, ge=1)
     mc_draws: int = Field(default=500, ge=1)
+    lomo_hours: int = Field(default=6, ge=0)
     seed: int = Field(default=0, ge=0)
 
 

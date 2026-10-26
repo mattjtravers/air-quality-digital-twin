@@ -117,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_.add_argument("--out", type=Path, required=True, help="report directory")
     evaluate_.add_argument("--mc-hours", type=_positive_int, help="Monte Carlo hours")
     evaluate_.add_argument("--mc-draws", type=_positive_int, help="Monte Carlo draws per hour")
+    evaluate_.add_argument(
+        "--lomo-hours", type=_non_negative_int, help="leave-one-monitor-out hours (0 skips it)"
+    )
     evaluate_.add_argument("--seed", type=_non_negative_int, help="random seed")
 
     db = commands.add_parser("db", help="PostGIS serving layer")
@@ -235,6 +238,7 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             for name, value in (
                 ("mc_hours", args.mc_hours),
                 ("mc_draws", args.mc_draws),
+                ("lomo_hours", args.lomo_hours),
                 ("seed", args.seed),
             )
             if value is not None

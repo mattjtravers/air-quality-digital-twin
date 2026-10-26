@@ -370,11 +370,17 @@ def test_no_configuration_files_are_read():
 def test_evaluate_dispatch_requires_its_window_and_output(env, stubs, monkeypatch, tmp_path):
     from aqdt.evaluation.schemas import EvaluationSettings
 
-    for name in ("AQDT_EVAL_MC_HOURS", "AQDT_EVAL_MC_DRAWS", "AQDT_EVAL_SEED"):
+    for name in (
+        "AQDT_EVAL_MC_HOURS",
+        "AQDT_EVAL_MC_DRAWS",
+        "AQDT_EVAL_LOMO_HOURS",
+        "AQDT_EVAL_SEED",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
     argv = ["evaluate", "--start", "2026-09-20T10:30", "--end", "2026-09-21T00:00"]
-    assert run([*argv, "--out", str(tmp_path), "--mc-draws", "7", "--seed", "3"]) == 0
+    options = ["--mc-draws", "7", "--lomo-hours", "0", "--seed", "3"]
+    assert run([*argv, "--out", str(tmp_path), *options]) == 0
     call = stubs.only("evaluate")
     archive_uri, start, end, out, settings = call.args[:5]
     assert archive_uri == ARCHIVE
@@ -382,7 +388,12 @@ def test_evaluate_dispatch_requires_its_window_and_output(env, stubs, monkeypatc
     assert end == datetime(2026, 9, 21, 0, tzinfo=UTC)
     assert str(out) == str(tmp_path)
     assert isinstance(settings, EvaluationSettings)
-    assert (settings.mc_hours, settings.mc_draws, settings.seed) == (24, 7, 3)
+    assert (settings.mc_hours, settings.mc_draws, settings.lomo_hours, settings.seed) == (
+        24,
+        7,
+        0,
+        3,
+    )
     assert not [c for c in stubs.calls if c.name == "connect"]
     for missing in (argv, ["evaluate", "--out", str(tmp_path)]):
         with pytest.raises(SystemExit) as exc:

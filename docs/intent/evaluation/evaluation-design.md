@@ -24,7 +24,9 @@ in an error budget, so a reader can see what the surface's uncertainty covers an
 Principles, in order of precedence when they conflict:
 
 1. **Score what is stored.** The surface scored is the raster in the archive, sampled as any
-   consumer would sample it; evaluation never re-kriges a surface to score it.
+   consumer would sample it. Re-kriging happens only in the counterfactual checks (§ Leave one
+   monitor out, § Baselines), which are reported beside the stored surface's scores, never in
+   place of them.
 2. **Read-only.** Evaluation reads the archive and writes nothing to it. Its outputs are a report
    directory — tables, figures, a summary — regenerated on demand, not a pipeline product.
 3. **Flagged rows are reported, not hidden.** Monitor hours with QC flags are excluded from the
@@ -141,8 +143,8 @@ The report states, for the window:
   `surface_sha256`.
 
 A window with no kriged hour still produces the report: the availability section says so, the
-metric tables are empty, and the Monte Carlo, the maps, and every figure drawn from matchups
-are skipped.
+metric tables are empty, and the Monte Carlo, LOMO, the baselines, the maps, and every figure
+drawn from matchups are skipped.
 
 ## Calibration uncertainty
 
@@ -320,7 +322,7 @@ Rows, at least:
 | Regression dilution (slopes below 1) | calibration | systematic-shared | listed-not-modeled (slope distribution reported) |
 | Kriging interpolation error | fusion | random | quantified-included |
 | Variogram fit (binning, range, model choice) | fusion | systematic-shared | quantified-diagnostic |
-| Monitors as calibration targets for nearby sensors | evaluation | systematic-shared | listed-not-modeled |
+| Monitors as calibration targets for nearby sensors | evaluation | systematic-shared | quantified-diagnostic |
 
 It is written as CSV and rendered as a figure-ready table.
 
@@ -362,6 +364,8 @@ availability.csv        per-monitor counts; gaps and non-kriged hours in summary
 fit_uncertainty.csv     per (site_id, fit_as_of): status, n, n_eff, ρ₁, Var(a), Var(b), Cov(a,b),
                         corrected and uncorrected; σ̂²; stored vs rebuilt n_pairs, slope, intercept
 montecarlo.csv          per sampled matchup: analytic, Monte Carlo, Monte Carlo (pooled independent)
+lomo.csv                per (LOMO hour, monitor): stored, control, and without-monitor errors
+baselines.csv           kriging, IDW, random forest × subset, accuracy metrics
 decomposition.csv       (a), (b), (c) and shares, by fit status and reference bound
 variogram_sensitivity.csv
 error_budget.csv
@@ -371,33 +375,79 @@ run.json                window, settings, seed, archive URI, package version, gi
 ```
 
 It writes nothing to the archive and returns the headline numbers. `aqdt evaluate --start --end
---out DIR [--mc-hours N] [--mc-draws N] [--seed N]` runs it from the command line (the pipeline
+--out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]` runs it from the command line (the pipeline
 segment owns the CLI; this command is on-demand, has no routine window and no workflow).
 
 **Summary.** `summary.md` states: hours and days available and the gaps; headline metrics
 (`unflagged`) and the `all` equivalents; coverage with kriging SD and with total SD; the Monte
-Carlo to analytic ratio; the decomposition shares; the maps' clipping; and the caveats — AirNow
+Carlo to analytic ratio; the decomposition shares; the maps' clipping; the LOMO and baseline
+comparisons; and the caveats — AirNow
 data are preliminary, sample sizes per split, weather differs between days, and the monitors are
 calibration targets for nearby sensors, so the check is not fully independent of the surface.
 
 Settings (`EvaluationSettings`, Pydantic settings from the environment): `AQDT_EVAL_MC_HOURS`
-(default 24), `AQDT_EVAL_MC_DRAWS` (default 500), `AQDT_EVAL_SEED` (default 0); the CLI options
-override them. Values below 1 (below 0 for the seed) fail validation naming the setting.
+(default 24), `AQDT_EVAL_MC_DRAWS` (default 500), `AQDT_EVAL_LOMO_HOURS` (default 6),
+`AQDT_EVAL_SEED` (default 0); the CLI options override them. `mc_hours` and `mc_draws` below 1,
+and `lomo_hours` or the seed below 0, fail validation naming the setting; `lomo_hours = 0` skips
+LOMO.
 
-## Further checks
+## Leave one monitor out
 
-Two checks run after the report above, each in its own section of the report:
+Every monitor scored is also a calibration reference for the sensors near it, so the surface has
+seen each monitor indirectly, through the fits. Leave one monitor out (LOMO) measures how much that
+dependence flatters the score at the monitor.
 
-- **Leave one monitor out.** For one or two hours, each monitor `X` in turn is removed from the
-  calibration references: the hour's fits are refit without `X` (calibration's `fit_sensors` on
-  the monitor observations minus `X`), the hour's sensors are recalibrated with those fits, the
-  hour is kriged as fusion would krige it, and the result is scored at `X`. Compared with the
-  stored surface's error at `X`, this measures how much the monitor's role as a calibration target
-  improves the surface's apparent accuracy there.
-- **Baselines.** On the same matchups and metrics: inverse-distance weighting (power 2) of the
-  hour's kriging points, and a random forest trained on the sensor points of all evaluated hours
-  with features `x`, `y`, UTC hour of day, and the hour's median sensor value, scored at the
-  monitors. One comparison table: kriging, IDW, random forest.
+On `lomo_hours` hours (default 6), chosen with the seed from the kriged hours with
+`inputs_reproduced` in the same way as the Monte Carlo sample (tertiles of the hour's mean monitor
+`obs`, spread across days; every eligible hour when fewer are eligible), and for each monitor `X`
+with a matchup in the hour:
+
+1. For each `fit_as_of` used by the hour's calibrated sensor hours, read the PurpleAir and AirNow
+   observations over `[fit_as_of − window_days, fit_as_of)` and aggregate them with
+   `aggregate_hourly`, as `fit_calibrations` does, with the calibration settings in the
+   environment.
+2. **Control.** Refit with calibration's `fit_sensors` on all the monitor observations.
+3. **Without `X`.** Refit with `fit_sensors` on the monitor observations with `X`'s removed, so
+   `X` is neither a reference for any sensor nor in the pooled fit's pairs; sensors that were
+   fitted against `X` match their next-nearest monitor within range, or fall to the pooled fit.
+4. For each refit, recalibrate the hour's calibrated sensor hours: each row's `pm25_calibrated` is
+   recomputed from the refit fit of its own `(site_id, fit_as_of)` as calibration applies a fit
+   (`max(0, intercept + slope × pm25_corrected_mean)`, null when the refit is `uncalibrated`),
+   and its `fit_status` becomes the refit's.
+5. Build the hour's kriging points with fusion's `hour_points`, select the variogram with fusion's
+   `select_variogram` (FUS-VAR), and predict at `X`'s coordinates with the selected variogram,
+   clamping the estimate at 0 as fusion stores it (FUS-PRED-003).
+
+The control isolates the monitor's role: the control and the without-`X` prediction share the
+point prediction, the variogram refit, and the archive's current state, and differ only in
+whether `X` calibrated anything. The stored surface's error at `X` is reported beside both. A
+refit that leaves the hour with fewer than fusion's `min_points` points, or with no eligible
+variogram, gives a null prediction for that refit; a sensor hour whose `(site_id, fit_as_of)` has
+no refit is treated as `uncalibrated`.
+
+`lomo.csv` holds one row per (hour, `X`): `hour`, `site_id`, `obs`, `flagged`, `stored_error`,
+`control_error`, `lomo_error` (each `prediction − obs`), `n_fitted_to_x` (the control's `fitted`
+sensors referencing `X`), and `n_changed` (sensors whose refit status or reference differs between
+control and without-`X`). The summary reports, over the unflagged rows, the RMSE of each error
+column and the median of `|lomo_error| − |control_error|`; that median fills the error budget's
+"monitors as calibration targets" magnitude.
+
+## Baselines
+
+Two simple predictors are scored at the same matchups, so kriging's skill reads against
+something:
+
+- **Inverse-distance weighting.** Power 2 over the hour's kriging points at the monitor's
+  coordinates; a point at distance 0 gives that point's value (the mean, if several).
+- **Random forest.** scikit-learn's `RandomForestRegressor` with `random_state = seed`, 200
+  trees, and a minimum of 5 samples per leaf, trained once on the kriging points of every kriged
+  hour in the window, with features `x`, `y`, UTC hour of day, and the hour's median point value,
+  and the point value as target; it predicts each matchup from the monitor's `x`, `y`, the hour
+  of day, and the hour's median point value.
+
+Neither predictor sees a monitor value. The predictions are columns `idw` and `rf` of
+`matchups.csv`; `baselines.csv` holds the EVAL-METRIC-001 metrics of `kriging` (the stored
+surface), `idw`, and `rf`, for the `unflagged` and `all` subsets, over the same matchups.
 
 ## Package Layout
 
@@ -415,7 +465,8 @@ src/aqdt/evaluation/
   figures.py      # every report figure but the maps
   report.py       # summary.md, run.json
   run.py          # evaluate: reads, per-hour scoring, maps, the report
-  further.py      # leave-one-monitor-out, baselines
+  lomo.py         # leave one monitor out
+  baselines.py    # IDW and random-forest baselines
 tests/evaluation/
 ```
 
@@ -438,6 +489,8 @@ never evaluate, so their environments do not install them.
 | Monte Carlo | A seeded, stratified sample of hours, PyKrige predictor | An independent code path checks the analytic algebra, including the shared covariance and the clamp, at a cost bounded by the sample. |
 | Reference precision | Two published hourly bounds (T640, BAM-1020) | AirNow does not report the method per site; reporting both bounds shows how much the decomposition depends on it. |
 | Variogram uncertainty | Diagnostic magnitude from the alternative candidate | Model choice is the largest visible variogram effect per hour; adding it to the total would need a variogram posterior this design does not have. |
+| LOMO comparison | A re-kriged control with the full fits, beside the stored surface | The stored cell and a point prediction from a refitted variogram differ for reasons unrelated to calibration; only the control holds everything but the monitor's role fixed. |
+| Baselines | IDW (power 2) and a random forest on location, hour, and the hour's level | IDW is the simplest spatial interpolator and the forest a common learned one; both use only the sensor points, as kriging does, so the comparison is on equal inputs. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions
@@ -449,6 +502,11 @@ never evaluate, so their environments do not install them.
    sensors.
 3. A variogram-uncertainty term in the total (e.g. by bootstrap of the points), if variogram
    sensitivity proves comparable to the kriging variance.
+4. A shared hourly calibration-error term in the total. Total-variance coverage at the monitors
+   falls short of nominal even with the calibration term, and the largest candidate it omits is an
+   error common to many sensors in the same hour — humidity or aerosol composition the Barkjohn
+   correction does not capture — which neither `ρ₁` nor the pooled covariance carries. It could be
+   estimated from the cross-sensor correlation of same-hour calibration residuals.
 
 ## References
 

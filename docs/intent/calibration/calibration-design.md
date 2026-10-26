@@ -205,6 +205,11 @@ tests/calibration/
    reference; depends on what AirNow's processing does to `Value`.
 4. Extending the fit with a humidity term per sensor if residuals show humidity structure after
    Barkjohn.
+5. An errors-in-variables fit (e.g. Deming regression with the variance ratio from the sensors'
+   detector noise and the monitors' published precision) in place of OLS. OLS of the monitor on a
+   noisy sensor value attenuates the slope, so calibrated values read high in clean air and low in
+   dirtier air, and the bias grows with the concentration — the pattern evaluation's PM2.5-level
+   split measures.
 
 ## References
 

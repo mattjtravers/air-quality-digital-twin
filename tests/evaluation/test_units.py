@@ -359,6 +359,7 @@ def test_error_budget_lists_every_known_source():
     assert by_source.loc[budget.POOLED_FIT, "type"] == "systematic-shared"
     assert by_source.loc[budget.POOLED_FIT, "handling"] == "quantified-included"
     assert by_source.loc[budget.BARKJOHN, "handling"] == "listed-not-modeled"
+    assert by_source.loc[budget.DEPENDENCE, "handling"] == "quantified-diagnostic"
     assert (table["magnitude"] != "").all()
 
 
@@ -367,12 +368,18 @@ def test_error_budget_lists_every_known_source():
 
 # @spec EVAL-CFG-001
 def test_settings_defaults_environment_and_validation(monkeypatch):
-    for name in ("AQDT_EVAL_MC_HOURS", "AQDT_EVAL_MC_DRAWS", "AQDT_EVAL_SEED"):
+    for name in (
+        "AQDT_EVAL_MC_HOURS",
+        "AQDT_EVAL_MC_DRAWS",
+        "AQDT_EVAL_LOMO_HOURS",
+        "AQDT_EVAL_SEED",
+    ):
         monkeypatch.delenv(name, raising=False)
     s = EvaluationSettings()
-    assert (s.mc_hours, s.mc_draws, s.seed) == (24, 500, 0)
+    assert (s.mc_hours, s.mc_draws, s.lomo_hours, s.seed) == (24, 500, 6, 0)
     monkeypatch.setenv("AQDT_EVAL_MC_DRAWS", "50")
-    assert EvaluationSettings().mc_draws == 50
-    for field, value in (("mc_hours", 0), ("mc_draws", 0), ("seed", -1)):
+    monkeypatch.setenv("AQDT_EVAL_LOMO_HOURS", "0")
+    assert (EvaluationSettings().mc_draws, EvaluationSettings().lomo_hours) == (50, 0)
+    for field, value in (("mc_hours", 0), ("mc_draws", 0), ("lomo_hours", -1), ("seed", -1)):
         with pytest.raises(ValidationError, match=field):
             EvaluationSettings(**{field: value})

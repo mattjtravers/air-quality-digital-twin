@@ -266,6 +266,12 @@ Dependencies: `pykrige`, `rasterio` (its wheels bundle GDAL with the COG driver)
 6. A third raster band carrying the total variance — kriging variance plus the propagated
    calibration uncertainty evaluation computes — once evaluation's Monte Carlo confirms the
    analytic propagation; it needs calibration to record each fit's parameter covariance.
+7. Screening kriging points for spatial outliers. A single sensor can read far above its
+   neighbours in an hour with both channels agreeing, so the dual-channel check passes it; kriging
+   then spreads the value over the surrounding cells and it sets the surface's maximum. A flag on
+   a point that departs from the leave-one-out kriging prediction of its neighbours by more than a
+   multiple of the kriging SD would catch it — recorded as a flag, never a drop, with the owner
+   (calibration's sensor hours or fusion's points) decided with the rule.
 
 ## References
 

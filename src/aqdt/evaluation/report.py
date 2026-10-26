@@ -154,6 +154,7 @@ def write_summary(path: Path, c: dict) -> None:
                 f"{_pct(r.share_c)} | {_num(r.clamped, 0) if r.clamped == r.clamped else '—'} |"
             )
         lines += [""]
+    lines += _further(c)
     ms = c["map_settings"]
     lines += [
         "## Maps",
@@ -190,6 +191,58 @@ def write_summary(path: Path, c: dict) -> None:
         "",
     ]
     path.write_text("\n".join(lines))
+
+
+# @spec EVAL-RUN-002, EVAL-LOMO-004, EVAL-BASE-003
+def _further(c: dict) -> list[str]:
+    """The leave-one-monitor-out and baseline sections."""
+    s = c["lomo"]
+    lines = ["## Leave one monitor out", ""]
+    if c["kriged_hours"] == 0:
+        lines += ["Skipped: no kriged hour.", ""]
+    elif c["settings"].lomo_hours == 0:
+        lines += ["Skipped: `lomo_hours` is 0.", ""]
+    else:
+        lines += [
+            f"Over {c['lomo_hours']} hours, each scored monitor in turn was removed from the "
+            "calibration references, the hour recalibrated and re-kriged, and the result scored "
+            "at that monitor; a control refit on every monitor went through the same path "
+            "(`lomo.csv`). RMSE over the unflagged rows, µg/m³:",
+            "",
+            "| Stored surface | Control | Without the monitor |",
+            "|---|---|---|",
+            f"| {_num(s['stored_error'])} | {_num(s['control_error'])} | "
+            f"{_num(s['lomo_error'])} |",
+            "",
+            f"Median of |error without the monitor| − |control error|: "
+            f"**{_num(s['median_difference'])} µg/m³** over {s['n']} monitor-hours. A positive "
+            "value means removing the monitor made the prediction there worse — its role as a "
+            "calibration target flatters the score at that monitor by about that much; zero or "
+            "negative means it does not.",
+            "",
+        ]
+    lines += ["## Baselines", ""]
+    b = c["baselines"]
+    if not len(b):
+        lines += ["Skipped: no kriged hour.", ""]
+        return lines
+    lines += [
+        "The same matchups predicted by inverse-distance weighting (IDW, power 2) of the hour's "
+        "kriging points, and by a random forest trained on the kriging points of every kriged "
+        "hour (location, UTC hour of day, the hour's median point value). Neither sees a "
+        "monitor value. The forest is trained on the same hours it predicts, so it is a spatial "
+        "hold-out, not a hold-out in time (`baselines.csv`).",
+        "",
+        "| Method | Subset | n | Bias | MAE | RMSE | R² | r |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    names = {"kriging": "kriging (stored surface)", "idw": "IDW", "rf": "random forest"}
+    for r in b.itertuples(index=False):
+        lines.append(
+            f"| {names[r.method]} | {r.subset} | {int(r.n)} | {_num(r.bias)} | {_num(r.mae)} | "
+            f"{_num(r.rmse)} | {_num(r.r2)} | {_num(r.pearson_r)} |"
+        )
+    return lines + [""]
 
 
 def _git_commit() -> str | None:

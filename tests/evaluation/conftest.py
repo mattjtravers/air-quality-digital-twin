@@ -183,7 +183,7 @@ def build_archive(uri: str) -> str:
 def eval_settings(**overrides):
     from aqdt.evaluation.schemas import EvaluationSettings
 
-    values = {"mc_hours": 2, "mc_draws": 40, "seed": 0} | overrides
+    values = {"mc_hours": 2, "mc_draws": 40, "lomo_hours": 2, "seed": 0} | overrides
     return EvaluationSettings(**values)
 
 
