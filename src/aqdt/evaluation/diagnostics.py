@@ -12,14 +12,19 @@ from aqdt.evaluation.metrics import matchup_metrics
 RELIABILITY_COLUMNS = ["bin", "n", "surface_mean", "obs_mean", "obs_ci_low", "obs_ci_high"]
 SLOPE_COLUMNS = ["slope", "estimate", "ci_low", "ci_high", "n"]
 Z_KINDS = ["z", "z_total_raw", "z_total", "z_total_shared"]
+SPLIT_KINDS = ["z_total_shared_odd_on_even", "z_total_shared_even_on_odd"]
 COVERAGE_COLUMNS = [
-    "kind", "n", "cov1", "cov2", "k68", "k68_ci_low", "k68_ci_high", "k95", "k95_ci_low",
-    "k95_ci_high", "mean", "sd", "shared_variance",
+    "kind", "n", "cov1", "cov1_ci_low", "cov1_ci_high", "cov2", "cov2_ci_low", "cov2_ci_high",
+    "k68", "k68_ci_low", "k68_ci_high", "k95", "k95_ci_low", "k95_ci_high", "mean", "sd",
+    "shared_variance", "shared_hours",
 ]
-POOLING_COLUMNS = ["model", "coefficient", "ci_low", "ci_high", "n"]
+POOLING_COLUMNS = ["quantity", "estimate", "ci_low", "ci_high", "n"]
+SHARE_QUANTILES = (("share_p25", 0.25), ("share_p50", 0.50), ("share_p75", 0.75))
 VARIOGRAM_CLASSES = ["pure_nugget", "short_range", "regular"]
 PERCENTILES = (5, 25, 50, 75, 95)
 LAGS = (-1, 0, 1)
+LAG_COLUMNS = ["lag", "n", "pearson_r", "rmse", "rmse_difference", "rmse_difference_ci_low",
+               "rmse_difference_ci_high"]
 
 
 # --- Conditional bias -------------------------------------------------------------------------
@@ -109,28 +114,57 @@ def inflation_factors(z) -> tuple[float, float]:
     return (float(np.quantile(az, 0.683) ** 2), float((np.quantile(az, 0.954) / 2) ** 2))
 
 
-def _kinds(frame: pd.DataFrame, shared_variance: float) -> dict[str, pd.Series]:
-    reproduced = frame["inputs_reproduced"].astype(bool)
-    z_total = frame["z_total"].where(reproduced)
+def _with_shared(frame: pd.DataFrame, z_total: pd.Series, shared_variance: float) -> pd.Series:
+    """``error / √(total_variance + σ²_shared)`` where ``z_total`` is defined."""
     total_variance = (frame["error"] / z_total) ** 2
     shared = 0.0 if not np.isfinite(shared_variance) else shared_variance
-    z_shared = np.where(
-        z_total == 0, 0.0, frame["error"] / np.sqrt(total_variance + shared)
-    )
-    return {
-        "z": frame["z"],
-        "z_total_raw": frame["z_total_raw"].where(reproduced),
-        "z_total": z_total,
-        "z_total_shared": pd.Series(np.where(z_total.notna(), z_shared, np.nan), index=frame.index),
+    z_shared = np.where(z_total == 0, 0.0, frame["error"] / np.sqrt(total_variance + shared))
+    return pd.Series(np.where(z_total.notna(), z_shared, np.nan), index=frame.index)
+
+
+def _odd_day(hours) -> np.ndarray:
+    return pd.to_datetime(pd.Series(hours), utc=True).dt.day.to_numpy() % 2 == 1
+
+
+def _kinds(frame: pd.DataFrame, shared_variance: float, residuals: pd.DataFrame | None):
+    """Each z kind with the σ²_shared and hour count it was scored with (null when none)."""
+    reproduced = frame["inputs_reproduced"].astype(bool)
+    z_total = frame["z_total"].where(reproduced)
+    kinds = {
+        "z": (frame["z"], np.nan, np.nan),
+        "z_total_raw": (frame["z_total_raw"].where(reproduced), np.nan, np.nan),
+        "z_total": (z_total, np.nan, np.nan),
+        "z_total_shared": (_with_shared(frame, z_total, shared_variance), shared_variance, np.nan),
     }
+    if residuals is None:
+        return kinds
+    odd_rows = _odd_day(frame["hour"]) if len(frame) else np.zeros(0, dtype=bool)
+    odd_residuals = (
+        _odd_day(residuals["hour"]) if len(residuals) else np.zeros(0, dtype=bool)
+    )
+    for kind, estimate_on_odd in zip(SPLIT_KINDS, (True, False)):
+        sigma2, hours = shared_offset(residuals[odd_residuals == estimate_on_odd])
+        scored = odd_rows != estimate_on_odd
+        z = _with_shared(frame, z_total, sigma2).where(scored)
+        kinds[kind] = (z, sigma2, hours)
+    return kinds
 
 
-# @spec EVAL-UNC-002, EVAL-UNC-003, EVAL-UNC-004
-def coverage_diagnostics(frame: pd.DataFrame, seed: int, shared_variance: float) -> pd.DataFrame:
-    """Per z kind (kriging only, total uninflated, total, total with the shared offset): the two
-    coverages, the inflation factors with day-bootstrap intervals, and z's mean and SD."""
+def _coverage(zv: np.ndarray, bound: float) -> float:
+    return float(np.mean(np.abs(zv) <= bound)) if len(zv) else np.nan
+
+
+# @spec EVAL-UNC-002, EVAL-UNC-003, EVAL-UNC-004, EVAL-UNC-005
+def coverage_diagnostics(
+    frame: pd.DataFrame, seed: int, shared_variance: float,
+    residuals: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per z kind (kriging only, total uninflated, total, total with the shared offset, and, given
+    the calibration residuals, the shared offset estimated on odd days and scored on even days and
+    the reverse): the two coverages and the inflation factors with day-bootstrap intervals, and
+    z's mean and SD."""
     rows = []
-    for kind, z in _kinds(frame, shared_variance).items():
+    for kind, (z, sigma2, hours) in _kinds(frame, shared_variance, residuals).items():
         values = z.to_numpy(dtype=float)
         keep = np.isfinite(values)
         zv = values[keep]
@@ -138,12 +172,18 @@ def coverage_diagnostics(frame: pd.DataFrame, seed: int, shared_variance: float)
         k68, k95 = inflation_factors(zv)
         k68_ci = block_interval(blocks, lambda idx, zv=zv: inflation_factors(zv[idx])[0], seed)
         k95_ci = block_interval(blocks, lambda idx, zv=zv: inflation_factors(zv[idx])[1], seed)
+        cov1_ci = mean_interval(blocks, (np.abs(zv) <= 1).astype(float), seed)
+        cov2_ci = mean_interval(blocks, (np.abs(zv) <= 2).astype(float), seed)
         rows.append(
             {
                 "kind": kind,
                 "n": len(zv),
-                "cov1": float(np.mean(np.abs(zv) <= 1)) if len(zv) else np.nan,
-                "cov2": float(np.mean(np.abs(zv) <= 2)) if len(zv) else np.nan,
+                "cov1": _coverage(zv, 1),
+                "cov1_ci_low": cov1_ci[0],
+                "cov1_ci_high": cov1_ci[1],
+                "cov2": _coverage(zv, 2),
+                "cov2_ci_low": cov2_ci[0],
+                "cov2_ci_high": cov2_ci[1],
                 "k68": k68,
                 "k68_ci_low": k68_ci[0],
                 "k68_ci_high": k68_ci[1],
@@ -152,7 +192,8 @@ def coverage_diagnostics(frame: pd.DataFrame, seed: int, shared_variance: float)
                 "k95_ci_high": k95_ci[1],
                 "mean": float(zv.mean()) if len(zv) else np.nan,
                 "sd": float(zv.std(ddof=1)) if len(zv) > 1 else np.nan,
-                "shared_variance": shared_variance if kind == "z_total_shared" else np.nan,
+                "shared_variance": sigma2,
+                "shared_hours": hours,
             }
         )
     return pd.DataFrame(rows, columns=COVERAGE_COLUMNS)
@@ -188,10 +229,12 @@ def _coefficient(y: np.ndarray, x: np.ndarray, effects: list[np.ndarray]) -> flo
     return float(beta[0])
 
 
-# @spec EVAL-POOL-001
+# @spec EVAL-POOL-001, EVAL-POOL-002
 def pooling_regression(frame: pd.DataFrame, seed: int) -> pd.DataFrame:
-    """OLS of ``error`` on ``pooled_share_10km`` with day fixed effects, and with day and
-    hour-of-day fixed effects, over the unflagged matchups with a share; day-cluster intervals."""
+    """Over the unflagged matchups with a pooled share: OLS of ``error`` on
+    ``pooled_share_10km`` with day fixed effects, and with day and hour-of-day fixed effects,
+    with day-cluster intervals; the raw error difference between matchups above the median share
+    and the rest, with its interval; and the share's mean, quartiles, and fraction exactly 0."""
     rows = frame[~frame["flagged"].astype(bool) & frame["pooled_share_10km"].notna()]
     hours = pd.to_datetime(rows["hour"], utc=True)
     day = days(rows["hour"])
@@ -201,7 +244,7 @@ def pooling_regression(frame: pd.DataFrame, seed: int) -> pd.DataFrame:
     out = []
     for model, with_hod in (("day", False), ("day+hour_of_day", True)):
         if len(rows) < 3:
-            out.append({"model": model, "coefficient": np.nan, "ci_low": np.nan,
+            out.append({"quantity": model, "estimate": np.nan, "ci_low": np.nan,
                         "ci_high": np.nan, "n": len(rows)})
             continue
 
@@ -213,9 +256,41 @@ def pooling_regression(frame: pd.DataFrame, seed: int) -> pd.DataFrame:
 
         all_rows = np.arange(len(rows))
         lo, hi = block_interval(day, fit, seed)
-        out.append({"model": model, "coefficient": fit(all_rows), "ci_low": lo, "ci_high": hi,
+        out.append({"quantity": model, "estimate": fit(all_rows), "ci_low": lo, "ci_high": hi,
+                    "n": len(rows)})
+    out.append({"quantity": "raw_high_minus_low", **_raw_difference(x, y, day, seed),
+                "n": len(rows)})
+    for quantity, value in _share_distribution(x):
+        out.append({"quantity": quantity, "estimate": value, "ci_low": np.nan, "ci_high": np.nan,
                     "n": len(rows)})
     return pd.DataFrame(out, columns=POOLING_COLUMNS)
+
+
+def _raw_difference(x: np.ndarray, y: np.ndarray, day: np.ndarray, seed: int) -> dict:
+    """Mean error above the median share minus mean error at or below it."""
+    if not len(x):
+        return {"estimate": np.nan, "ci_low": np.nan, "ci_high": np.nan}
+    high = (x > np.median(x)).astype(float)
+    data = np.column_stack([high, high * y, 1 - high, (1 - high) * y])
+
+    def difference(t: np.ndarray) -> np.ndarray:
+        return t[:, 1] / t[:, 0] - t[:, 3] / t[:, 2]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        estimate = float(difference(data.sum(axis=0)[None, :])[0])
+    lo, hi = sums_interval(day, data, difference, seed)
+    return {"estimate": estimate, "ci_low": lo, "ci_high": hi}
+
+
+def _share_distribution(x: np.ndarray) -> list[tuple[str, float]]:
+    if not len(x):
+        return [(name, np.nan) for name in
+                ("share_mean", *(q for q, _ in SHARE_QUANTILES), "share_zero")]
+    return [
+        ("share_mean", float(x.mean())),
+        *((name, float(np.quantile(x, q))) for name, q in SHARE_QUANTILES),
+        ("share_zero", float(np.mean(x == 0))),
+    ]
 
 
 # --- Per monitor, variograms, lags, flag rates ------------------------------------------------
@@ -280,10 +355,11 @@ def variogram_table(fits: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["quantity", "name", "value"])
 
 
-# @spec EVAL-LAG-001
-def lag_table(matchups: pd.DataFrame, observations: pd.DataFrame) -> pd.DataFrame:
+# @spec EVAL-LAG-001, EVAL-LAG-002
+def lag_table(matchups: pd.DataFrame, observations: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
     """For lags −1, 0, +1 h: pairs, correlation, and RMSE of surface(H) against the same
-    monitor's unflagged obs(H + lag)."""
+    monitor's unflagged obs(H + lag); for ±1, the RMSE minus lag 0's over the matchups with both,
+    with a day-bootstrap interval."""
     trusted = observations[
         observations["qc_flags"].map(len).eq(0) & observations["pm25_raw"].notna()
     ]
@@ -294,19 +370,39 @@ def lag_table(matchups: pd.DataFrame, observations: pd.DataFrame) -> pd.DataFram
         ),
     )
     hours = pd.to_datetime(matchups["hour"], utc=True)
-    rows = []
+    surface = matchups["surface"].to_numpy(dtype=float)
+    blocks = days(hours) if len(matchups) else np.array([])
+    observed = {}
     for lag in LAGS:
         keys = pd.MultiIndex.from_arrays(
             [matchups["site_id"].astype(str), hours + pd.Timedelta(hours=lag)]
         )
-        obs = lookup.reindex(keys).to_numpy(dtype=float)
-        surface = matchups["surface"].to_numpy(dtype=float)
+        observed[lag] = lookup.reindex(keys).to_numpy(dtype=float)
+    rows = []
+    for lag in LAGS:
+        obs = observed[lag]
         ok = np.isfinite(obs) & np.isfinite(surface)
         n = int(ok.sum())
         r = float(np.corrcoef(surface[ok], obs[ok])[0, 1]) if n > 2 else np.nan
         rmse = float(np.sqrt(np.mean((surface[ok] - obs[ok]) ** 2))) if n else np.nan
-        rows.append({"lag": lag, "n": n, "pearson_r": r, "rmse": rmse})
-    return pd.DataFrame(rows, columns=["lag", "n", "pearson_r", "rmse"])
+        difference, interval = np.nan, (np.nan, np.nan)
+        both = ok & np.isfinite(observed[0])
+        if lag != 0 and both.any():
+            data = np.column_stack([
+                np.ones(int(both.sum())),
+                (surface[both] - obs[both]) ** 2,
+                (surface[both] - observed[0][both]) ** 2,
+            ])
+
+            def rmse_difference(t: np.ndarray) -> np.ndarray:
+                return np.sqrt(t[:, 1] / t[:, 0]) - np.sqrt(t[:, 2] / t[:, 0])
+
+            difference = float(rmse_difference(data.sum(axis=0)[None, :])[0])
+            interval = sums_interval(blocks[both], data, rmse_difference, seed)
+        rows.append({"lag": lag, "n": n, "pearson_r": r, "rmse": rmse,
+                     "rmse_difference": difference, "rmse_difference_ci_low": interval[0],
+                     "rmse_difference_ci_high": interval[1]})
+    return pd.DataFrame(rows, columns=LAG_COLUMNS)
 
 
 # @spec EVAL-FLAG-001

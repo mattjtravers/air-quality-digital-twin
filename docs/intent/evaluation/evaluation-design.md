@@ -335,7 +335,8 @@ When total coverage falls short of nominal, the report shows where the shortfall
   (`z_total_raw`, from `cal_variance_raw`, the same propagation with the uncorrected `C`); total
   with the `n / n_eff` inflation (`z_total`). The difference between the last two is the effect of
   the serial-correlation correction.
-- **Inflation factor.** For each of `z`, `z_total_raw`, and `z_total`, the factor `k` by which the
+- **Inflation factor.** For each of `z`, `z_total_raw`, and `z_total`, the ±1 SD and ±2 SD coverage
+  with day-bootstrap intervals, and the factor `k` by which the
   variance would have to be multiplied for the observed coverage to be nominal:
   `k₆₈ = q₀.₆₈₃(|z|)²` and `k₉₅ = (q₀.₉₅₄(|z|) / 2)²`, where `q_p` is the empirical quantile, with
   day-bootstrap intervals; and the mean and SD of `z` and `z_total`, which are 0 and 1 for a
@@ -352,6 +353,13 @@ When total coverage falls short of nominal, the report shows where the shortfall
   `total_variance + σ²_shared` would give — the kriging weights sum to 1, so a common offset passes
   to the monitor whole. It is a diagnostic: the residuals are computed against the same monitors
   the coverage is scored at, so it is not added to the reported total.
+- **Shared offset scored out of sample.** The in-sample figure estimates `σ²_shared` and scores
+  coverage on the same matchups. The split-day check removes that overlap: `σ²_shared` estimated
+  from the residuals of hours on odd UTC days of the month scores the coverage of the matchups on
+  even days, and the reverse. Each direction reports its `σ²_shared`, its hour count, and its ±1 SD
+  and ±2 SD coverage with day-bootstrap intervals over the scored days. Neighbouring days still
+  share weather regimes and the residuals still use the scored monitors on other days, so the
+  check removes the reuse of matchups, not every dependence.
 - **Coverage by group** comes from the metric table's splits: predicted level, day, spike hour,
   and spike day.
 
@@ -484,13 +492,18 @@ baseline_paired.csv     per baseline and group: mean |kriging error| − |baseli
 decomposition.csv       (a), (b), (c) and shares, by fit status and reference bound
 variogram_sensitivity.csv
 variogram.csv           variogram classes, models, range percentiles
-coverage_diagnostics.csv  per z kind: coverages, inflation factors, mean and SD; shared offset
+coverage_diagnostics.csv  per z kind: coverages, inflation factors, mean and SD; shared offset,
+                        in sample and split by odd and even days
+anomaly.csv             per method: common-offset and anomaly shares of MSE, anomaly and
+                        hourly-mean correlations, anomaly RMSE, with intervals
 conditional_bias.csv    reliability and reverse slopes with intervals
 spike_points.csv        each spike point
 spikes.csv              per (affected hour, monitor): control and without-spike errors
-pooling.csv             the fixed-effects coefficients
+spike_tiers.csv         per spike-value tier: points, hours, hourly bias with and without the tier
+pooling.csv             the fixed-effects coefficients; the pooled-share distribution and the
+                        raw bias difference between low and high pooled share
 per_monitor.csv
-lag.csv
+lag.csv                 per lag: pairs, correlation, RMSE; RMSE difference from lag 0
 error_budget.csv
 <figure>.png, <figure>.csv
 figures.md              numbered figure captions
@@ -519,20 +532,25 @@ segment owns the CLI; this command is on-demand, has no routine window and no wo
 **Summary.** `summary.md` opens with **plain answers** — one short paragraph each, stating the
 number and its interval and a verdict from the rules in the sections above:
 
-1. Does kriging beat the hourly-mean, IDW, and random-forest baselines, and by how much (the
+1. Where does kriging's skill come from — how much of its error is the hour's common offset and
+   how much the within-hour anomaly, and how well does it place the within-hour pattern against
+   IDW, the random forest, and the hourly mean?
+2. What does the pooled fraction near a monitor do to the bias: how much leverage the pooled share
+   has, the raw and within-day differences, their signs, and the effect per 10 percentage points?
+3. What variance inflation would make coverage nominal, how much do the `n / n_eff` correction
+   and the shared hourly offset change it, and what does the offset give when estimated on one
+   half of the days and scored on the other?
+4. Does kriging beat the hourly-mean, IDW, and random-forest baselines, and by how much (the
    paired differences)?
-2. How much does leave one monitor out worsen the error at the monitors, and does the effect grow
+5. How much does leave one monitor out worsen the error at the monitors, and does the effect grow
    with the number of sensors fitted to the monitor?
-3. Does the level-dependent bias survive when split by predicted level (and is the surface
-   over-smoothed or over-dispersed)?
-4. What variance inflation would make coverage nominal, and how much do the shared hourly offset
-   and the `n / n_eff` correction change it?
-5. How much of the affected days' error do the spikes account for?
-6. Does the pooled fraction near a monitor, with the day held fixed, support pooling as a cause of
-   bias?
+6. Does the level-dependent bias survive when split by predicted level, at what size against the
+   observed-level split (and is the surface over-smoothed or over-dispersed)?
+7. How much of the affected days' error do the spikes account for, and which tier of spike value
+   carries it?
 
 It then states: hours and days available and the gaps; headline metrics (`unflagged`) and the
-`all` equivalents, with intervals; the flag rate with both denominators; coverage three ways; the
+`all` equivalents, with the bias and RMSE intervals of `metrics.csv`'s overall rows; the flag rate with both denominators; coverage three ways; the
 calibration-variance formula; the Monte Carlo to analytic ratio; the decomposition shares; the
 conditional-bias, spike, pooling, variogram, and lag results; the maps' clipping; the LOMO and
 baseline comparisons; and the caveats — AirNow data are preliminary, sample sizes per split,
@@ -637,6 +655,42 @@ groups).
 overall and per observed-level and predicted-level group. Negative means kriging is closer to the
 monitor; kriging "beats" `B` only when the interval lies below 0.
 
+## Common offset and within-hour anomaly
+
+A surface can score well at the monitors by getting each hour's overall level right (time) or by
+placing the differences between monitors within the hour right (space). The two are separated on
+the unflagged matchups of hours with at least 5 of them — fewer leaves the hour's mean too noisy to
+stand for its level. For each method `m` (`kriging`, `idw`, `rf`, `hour_mean`) with prediction
+`p` and error `e = p − obs`:
+
+- **Common offset** `ē_H`, the mean of `e` over the hour's matchups, and **anomaly**
+  `a = e − ē_H`. Within each hour the anomalies sum to 0, so the MSE splits exactly:
+  `mean(e²) = mean(ē_H²) + mean(a²)` over the matchups. The offset share is
+  `Σ ē_H² / Σ e²`, the anomaly share its complement.
+- **Anomaly correlation**: Pearson correlation of `p − p̄_H` with `obs − ōbs_H` over the matchups
+  — how well the method places the within-hour pattern. Null for `hour_mean`, whose prediction is
+  the same at every monitor (its anomaly is 0). **Anomaly RMSE** `√mean(a²)`; for `hour_mean` it
+  is the monitors' own within-hour spread, the floor a spatial method must get under.
+- **Hourly-mean correlation**: Pearson correlation over hours of `p̄_H` with `ōbs_H` — how well
+  the method tracks the hour's level.
+- **Against the hourly mean**: the reduction in each MSE component from `hour_mean` to `m`,
+  `mean(ē_H²)` and `mean(a²)`, each with an interval.
+- **Variance explained.** The monitors' own variance splits the same way, into the across-hour
+  part `V_across` (the spread of the hourly monitor means) and the within-hour part `V_within`
+  (the spread of the monitors about their hour's mean). A method explains `1 − mean(ē_H²) /
+  V_across` of the first and `1 − mean(a²) / V_within` of the second. The hourly mean explains
+  none of the within-hour variance by construction, so its across-hour figure is what tracking the
+  hour's level alone achieves.
+
+`anomaly.csv` holds per method the matchup and hour counts, the two shares, the anomaly
+correlation, anomaly RMSE, hourly-mean correlation, the two reductions, and the two
+variance-explained fractions, each with its day-bootstrap interval, and the two parts of the
+monitors' variance with their shares. The summary puts the variance-explained table beside its
+verdict: kriging's skill comes mainly from the hour's level when the variance it explains across
+hours (`V_across` times the fraction) exceeds the variance it explains within the hour, and mainly
+from the within-hour pattern otherwise. The comparison is in variance, not in fractions, because
+the two parts of the monitors' variance differ in size.
+
 ## Spikes
 
 A single sensor can read far above its neighbours with both channels agreeing, pass every QC check,
@@ -663,15 +717,35 @@ matchups, each affected hour's bias and RMSE with and without the spikes (stored
 error + Δ); the RMSE of each affected day both ways; and the headline metrics with and without the
 affected hours.
 
+**Tiers.** Spike values span an order of magnitude, and a 25 µg/m³ point and a 180 µg/m³ point
+are different problems. Spike points are grouped by value into `20–50` (`z ≤ 50`), `50–100`
+(`50 < z ≤ 100`), and `>100` µg/m³. For each tier, every affected hour holding a point of that tier
+is re-kriged with only that tier's points removed, against the same control, giving `Δ_tier` at
+each monitor. `spike_tiers.csv` gives per tier the points, the hours, the unflagged matchups in
+those hours, their mean bias with the stored errors and with `stored + Δ_tier`, and the mean
+change in bias with a day-bootstrap interval.
+
 ## Pooling within the hour
 
 `bias_vs_pooled` relates hourly bias to the hour's pooled share, but pooled share moves with the
 day's weather, so the two can be correlated without one causing the other. The matchup-level test
 holds the day fixed: OLS of `error` on `pooled_share_10km` with day fixed effects, and again with
 day and hour-of-day fixed effects, over the unflagged matchups with a non-null `pooled_share_10km`.
-`pooling.csv` gives each model's coefficient (µg/m³ per unit pooled fraction), its day-cluster
-bootstrap interval (resampling days, refitting), and `n`. The summary says pooling is supported as
-a driver of the bias only when the coefficient's interval excludes 0 in both models.
+
+A coefficient is only as informative as the spread of the variable behind it. Over the same
+matchups the report gives the distribution of `pooled_share_10km` (mean, quartiles, the share
+exactly 0) and the raw difference in mean error between high-share matchups (above the median) and
+low-share ones (at or below it), with a day-bootstrap interval. The summary states the raw and
+within-day signs and whether they agree, each coefficient per 10 percentage points of pooled share,
+and the within-day effect across the interquartile range. Leverage is low when the 75th
+percentile is below 10%: most monitors then see almost no pooled sensors nearby, and no
+coefficient on the share can move much of the bias. The regression measures an association within
+the day; it is not described as a cause.
+
+`pooling.csv` is long: one row per `quantity` — each model's coefficient (µg/m³ per unit pooled
+fraction) with its day-cluster bootstrap interval (resampling days, refitting), the raw high − low
+difference with its interval, and the distribution's mean, quartiles, and zero share — with
+`estimate`, `ci_low`, `ci_high`, and `n`.
 
 ## Per monitor
 
@@ -691,10 +765,22 @@ the count of each `variogram_model`, and the 5th, 25th, 50th, 75th, and 95th per
 
 ## Timing alignment
 
+Both sides of a matchup are labelled by the start of their hour. AirNow's hour `H` is the
+monitor's average over `[H, H + 1 h)` (hour-beginning). The surface's hour `H` is kriged from each
+sensor's PurpleAir snapshots with `observed_at` in `[H, H + 1 h)`; with hourly collection at
+half past the hour, that is in practice one near-instantaneous reading near `H:30`, the middle of
+the monitor's averaging hour. Matchups pair the two at the same `H`, with no shift.
+
 An hour misaligned between the surface and AirNow would show as a better match at a lag.
 `lag.csv` pairs each matchup's `surface` with the same monitor's unflagged `obs` at `hour + lag`
 for lags −1, 0, and +1 h (from the AirNow observations the run reads, extended by an hour each
-side), giving `n`, `pearson_r`, and `rmse` per lag.
+side), giving `n`, `pearson_r`, and `rmse` per lag, and, for lags ±1, the RMSE at the lag minus
+the RMSE at lag 0 over the matchups with an `obs` at both, with a day-bootstrap interval. The hour
+labels follow the convention above by construction, so a lag that fits better (its difference
+interval wholly below 0) is not a labelling error; the summary gives its size, also as a share of
+the lag-0 RMSE, so a reader can judge whether it matters. The slow diurnal rise and fall of PM2.5
+makes neighbouring hours similar, and the instruments' response times differ, so small
+differences at ±1 h are expected.
 
 ## Flag rates
 
@@ -723,7 +809,8 @@ src/aqdt/evaluation/
   baselines.py    # hourly mean and median, IDW, and random-forest baselines; paired comparison
   bootstrap.py    # day and hour block bootstraps, metric intervals
   diagnostics.py  # conditional bias, coverage diagnostics, pooling, per monitor, variograms, lag
-  spikes.py       # spike rule and re-krige
+  spikes.py       # spike rule, re-krige, value tiers
+  anomaly.py      # common offset and within-hour anomaly
 tests/evaluation/
 ```
 
@@ -752,7 +839,9 @@ never evaluate, so their environments do not install them.
 | Level-dependent bias | Judged on predicted level and a reliability slope, with the observed-level split beside them | Splitting by the observed value conditions on the monitor's noise and manufactures the pattern for any predictor; the predicted value does not contain that noise. |
 | Spike detection | A robust rule on each hour's points (median + 5 × 1.4826 × MAD, and above 20 µg/m³) | A rule applied to the data finds every such point, including ones not yet noticed; the robust scale ignores the spike itself, and the absolute floor keeps quiet hours from flagging ordinary scatter. |
 | Shared hourly offset | Diagnosed from same-hour calibration residuals, not added to the total | It is estimated against the monitors coverage is scored at, so adding it would fit the uncertainty to the test; reported beside the total, it shows how much of the shortfall it could explain. |
-| Pooling as a cause | Matchup-level regression on pooled share within 10 km, day fixed effects | Hourly pooled share moves with the day's weather; holding the day fixed separates the sensors' calibration route from what the day was like. |
+| Pooling and bias | Matchup-level regression on pooled share within 10 km, day fixed effects, read beside the share's distribution and the raw difference | Hourly pooled share moves with the day's weather; holding the day fixed separates the sensors' calibration route from what the day was like, and the distribution shows how much of the bias any coefficient on the share could carry. |
+| Space and time | Exact split of MSE into the hour's common offset and the within-hour anomaly, over hours with at least 5 matchups | A surface interpolated from sensors can be right about the hour's level and wrong about where it is higher or lower, or the reverse; the split says which one its skill rests on, and the hourly mean baseline anchors the anomaly floor. |
+| Shared-offset check | Estimated on odd UTC days, scored on even days, and the reverse | Scoring on matchups the estimate never used removes the reuse of the same matchups; alternating days keeps both halves spread across the window's weather. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions

@@ -46,10 +46,12 @@ FILES = [
     "variogram_sensitivity.csv",
     "variogram.csv",
     "coverage_diagnostics.csv",
+    "anomaly.csv",
     "reliability.csv",
     "conditional_bias.csv",
     "spike_points.csv",
     "spikes.csv",
+    "spike_tiers.csv",
     "pooling.csv",
     "per_monitor.csv",
     "lag.csv",
@@ -397,14 +399,17 @@ def test_report_files_and_summary_contents(report):
         assert phrase in text, phrase
 
 
-# @spec EVAL-RUN-005, EVAL-FLAG-001, EVAL-UNC-004, EVAL-SPLIT-005
+# @spec EVAL-RUN-005, EVAL-FLAG-001, EVAL-UNC-004, EVAL-SPLIT-005, EVAL-POOL-003
 def test_summary_opens_with_the_plain_answers(report):
     text = (report[0] / "summary.md").read_text()
     head = text.split("## ")[1].lower()
     assert head.startswith("plain answers")
-    for phrase in ("baselines", "leave one monitor out", "predicted level", "inflation",
-                   "spike", "pooled"):
-        assert phrase in head, phrase
+    order = ["where does kriging's skill come from", "pooled", "inflation", "baselines",
+             "leave one monitor out", "predicted level", "spike"]
+    positions = [head.find(phrase) for phrase in order]
+    assert all(p >= 0 for p in positions), dict(zip(order, positions))
+    assert positions == sorted(positions)
+    assert "driver" not in head
     lower = text.lower()
     assert "flagged share of airnow observations" in lower and "flagged share of matchups" in lower
     assert "λᵀ m σ_s mᵀ λ" in lower and "n / n_eff" in lower
@@ -579,15 +584,17 @@ def test_metric_table_has_pearson_r2_new_splits_and_interval_columns(report):
     assert table["rmse_ci_low"].isna().all()  # the synthetic window is a single day
 
 
-# @spec EVAL-COND-001, EVAL-COND-002, EVAL-UNC-002, EVAL-UNC-003, EVAL-UNC-004
+# @spec EVAL-COND-001, EVAL-COND-002, EVAL-UNC-002, EVAL-UNC-003, EVAL-UNC-004, EVAL-UNC-005
 def test_conditional_bias_and_coverage_diagnostics_are_written(report):
     reliability = _csv(report, "reliability.csv")
     assert reliability["n"].sum() == (~_csv(report, "matchups.csv")["flagged"]).sum()
     slopes = _csv(report, "conditional_bias.csv")
     assert set(slopes["slope"]) == {"obs_on_surface", "surface_on_obs"}
     coverage = _csv(report, "coverage_diagnostics.csv")
-    assert list(coverage["kind"]) == ["z", "z_total_raw", "z_total", "z_total_shared"]
-    assert "shared_variance" in coverage.columns
+    assert list(coverage["kind"]) == ["z", "z_total_raw", "z_total", "z_total_shared",
+                                      "z_total_shared_odd_on_even", "z_total_shared_even_on_odd"]
+    for column in ("shared_variance", "shared_hours", "cov1_ci_low", "cov2_ci_high"):
+        assert column in coverage.columns, column
 
 
 # @spec EVAL-SPIKE-001, EVAL-SPIKE-002, EVAL-SPIKE-003
@@ -599,10 +606,13 @@ def test_a_window_without_spikes_writes_empty_spike_tables(report, matchups):
     assert set(matchups["spike_hour"]) == {"other"} and set(matchups["spike_day"]) == {"other"}
 
 
-# @spec EVAL-POOL-001, EVAL-MON-001, EVAL-VARIO-001, EVAL-LAG-001, EVAL-IN-004
+# @spec EVAL-POOL-001, EVAL-POOL-002, EVAL-MON-001, EVAL-VARIO-001, EVAL-LAG-001, EVAL-LAG-002
+# @spec EVAL-IN-004
 def test_further_diagnostics_are_written(report, matchups):
     pooling = _csv(report, "pooling.csv")
-    assert list(pooling["model"]) == ["day", "day+hour_of_day"]
+    assert list(pooling["quantity"]) == ["day", "day+hour_of_day", "raw_high_minus_low",
+                                         "share_mean", "share_p25", "share_p50", "share_p75",
+                                         "share_zero"]
     per_monitor = _csv(report, "per_monitor.csv")
     assert set(per_monitor["site_id"]) == set(INSIDE)
     variogram = _csv(report, "variogram.csv")
@@ -610,6 +620,9 @@ def test_further_diagnostics_are_written(report, matchups):
     assert counts == len(KRIGED)
     lag = _csv(report, "lag.csv").set_index("lag")
     assert list(lag.index) == [-1, 0, 1]
+    assert {"rmse_difference", "rmse_difference_ci_low", "rmse_difference_ci_high"} <= set(
+        lag.columns
+    )
     assert lag.loc[0, "n"] == (~matchups["flagged"]).sum()
     # the reads extend an hour past the window, but matchups stay inside it
     assert set(matchups["hour"]) <= set(KRIGED)

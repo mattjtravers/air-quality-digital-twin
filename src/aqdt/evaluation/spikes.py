@@ -6,12 +6,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from aqdt.evaluation.bootstrap import days, mean_interval
 from aqdt.evaluation.lomo import predict_at
 from aqdt.fusion.points import HourPoints
 
 MAD_SCALE = 1.4826
 MAD_MULTIPLE = 5.0
 FLOOR = 20.0  # µg/m³
+TIERS = ("20–50", "50–100", ">100")
+TIER_COLUMNS = ["tier", "points", "hours", "n", "bias", "bias_without", "change", "change_ci_low",
+                "change_ci_high"]
 POINT_COLUMNS = ["hour", "site_ids", "z", "median", "mad"]
 COLUMNS = [
     "hour",
@@ -166,3 +170,65 @@ def spike_summary(
         "headline_all": matchup_metrics(unflagged),
         "headline_unaffected": matchup_metrics(unaffected),
     }
+
+
+# @spec EVAL-SPIKE-005
+def tier(z: float) -> str:
+    """A spike point's value tier: ``20–50`` up to 50, ``50–100`` up to 100, ``>100`` above."""
+    if z <= 50:
+        return TIERS[0]
+    if z <= 100:
+        return TIERS[1]
+    return TIERS[2]
+
+
+# @spec EVAL-SPIKE-005
+def tier_masks(z) -> dict[str, np.ndarray]:
+    """For each tier present among the hour's spike points, the mask of that tier's points."""
+    z = np.asarray(z, dtype=float)
+    mask = spike_mask(z)
+    labels = np.array([tier(v) if m else "" for v, m in zip(z, mask)])
+    return {t: labels == t for t in TIERS if (labels == t).any()}
+
+
+# @spec EVAL-SPIKE-005
+def tier_summary(
+    matchups: pd.DataFrame, rows: pd.DataFrame, points: pd.DataFrame, seed: int
+) -> pd.DataFrame:
+    """Per tier, over the unflagged matchups of the hours holding a point of the tier: the mean
+    bias with the stored errors and with ``stored + delta_tier``, and the change with its
+    day-bootstrap interval. ``rows`` carries ``tier``, ``hour``, ``site_id``, and ``delta``."""
+    unflagged = matchups[~matchups["flagged"].astype(bool)] if len(matchups) else matchups
+    point_tiers = points["z"].map(tier) if len(points) else pd.Series(dtype=str)
+    out = []
+    for name in TIERS:
+        in_tier = points[point_tiers == name] if len(points) else points
+        hours = set(in_tier["hour"]) if len(in_tier) else set()
+        part = unflagged[unflagged["hour"].isin(hours)] if len(unflagged) else unflagged
+        tier_rows = rows[rows["tier"] == name] if len(rows) else rows
+        delta = {(r.hour, r.site_id): r.delta for r in tier_rows.itertuples(index=False)}
+        change = np.array(
+            [
+                0.0 if not np.isfinite(delta.get((h, s), np.nan)) else delta[(h, s)]
+                for h, s in zip(part["hour"], part["site_id"])
+            ],
+            dtype=float,
+        )
+        error = part["error"].to_numpy(dtype=float)
+        lo, hi = (
+            mean_interval(days(part["hour"]), change, seed) if len(part) else (np.nan, np.nan)
+        )
+        out.append(
+            {
+                "tier": name,
+                "points": len(in_tier),
+                "hours": len(hours),
+                "n": len(part),
+                "bias": float(error.mean()) if len(part) else np.nan,
+                "bias_without": float((error + change).mean()) if len(part) else np.nan,
+                "change": float(change.mean()) if len(part) else np.nan,
+                "change_ci_low": lo,
+                "change_ci_high": hi,
+            }
+        )
+    return pd.DataFrame(out, columns=TIER_COLUMNS)

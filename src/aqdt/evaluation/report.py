@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from aqdt.evaluation.anomaly import skill_source
 from aqdt.evaluation.diagnostics import clean_dirty_holds, smoothing_verdict
 
 
@@ -29,7 +30,7 @@ def _num(value, digits: int = 2) -> str:
 def _pct(value) -> str:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "—"
-    return f"{100 * value:.1f}%"
+    return f"{100 * value + 0.0:.1f}%" if abs(value) >= 5e-4 else "0.0%"
 
 
 def _finite(value) -> bool:
@@ -41,6 +42,44 @@ def _ci(value, lo, hi, digits: int = 2) -> str:
     if not _finite(lo) or not _finite(hi):
         return _num(value, digits)
     return f"{_num(value, digits)} [{_num(lo, digits)}, {_num(hi, digits)}]"
+
+
+def _signed(value, digits: int = 2) -> str:
+    if not _finite(value):
+        return "—"
+    return f"{value:+.{digits}f}"
+
+
+def _sci(value, lo, hi, digits: int = 2) -> str:
+    """``_ci`` with explicit signs."""
+    if not _finite(lo) or not _finite(hi):
+        return _signed(value, digits)
+    return f"{_signed(value, digits)} [{_signed(lo, digits)}, {_signed(hi, digits)}]"
+
+
+def _pct_ci(value, lo, hi) -> str:
+    if not _finite(lo) or not _finite(hi):
+        return _pct(value)
+    return f"{_pct(value)} [{_pct(lo)}, {_pct(hi)}]"
+
+
+# @spec EVAL-RUN-006
+def headline_rows(metrics: pd.DataFrame, headline: dict, all_metrics: dict) -> tuple[dict, dict]:
+    """The headline ``unflagged`` and ``all`` metrics with the bias and RMSE intervals of the
+    metric table's ``overall`` rows for the same subset."""
+    out = []
+    for subset, m in (("unflagged", headline), ("all", all_metrics)):
+        rows = metrics[(metrics["subset"] == subset) & (metrics["split"] == "overall")]
+        row = dict(m)
+        if len(rows):
+            first = rows.iloc[0]
+            for name in ("bias", "rmse"):
+                for side in ("low", "high"):
+                    key = f"{name}_ci_{side}"
+                    if key in first.index:
+                        row[key] = first[key]
+        out.append(row)
+    return out[0], out[1]
 
 
 def _metrics_row(label: str, m: dict) -> str:
@@ -115,7 +154,7 @@ def _hours(values) -> str:
 
 
 # @spec EVAL-RUN-002, EVAL-AVAIL-001, EVAL-AVAIL-003, EVAL-AVAIL-004, EVAL-FIG-005
-# @spec EVAL-SPLIT-005, EVAL-FLAG-001
+# @spec EVAL-SPLIT-005, EVAL-FLAG-001, EVAL-RUN-006
 def write_summary(path: Path, c: dict) -> None:
     lines = [
         "# Surface evaluation",
@@ -157,8 +196,12 @@ def write_summary(path: Path, c: dict) -> None:
         R2_LABELS,
         "",
         _HEADER,
-        _metrics_row("unflagged", c["headline"]),
-        _metrics_row("all", c["all"]),
+        *(
+            _metrics_row(label, row)
+            for label, row in zip(
+                ("unflagged", "all"), headline_rows(c["metrics"], c["headline"], c["all"])
+            )
+        ),
         "",
     ]
     if len(c["matchups"]):
@@ -454,16 +497,166 @@ def _beats(lo, hi) -> str:
     return "no difference the interval can distinguish"
 
 
-# @spec EVAL-RUN-005, EVAL-BASE-005, EVAL-COND-003, EVAL-LOMO-007, EVAL-POOL-001
-def _plain_answers(c: dict) -> list[str]:
-    lines = ["## Plain answers", ""]
-    if c["kriged_hours"] == 0 or not len(c["matchups"]):
-        return lines + [
-            "No hour was kriged in the window, so none of the questions below (baselines, "
-            "leave one monitor out, predicted level, inflation, spike, pooled) can be answered.",
-            "",
-        ]
-    # 1. Baselines
+METHOD_NAMES = {"kriging": "kriging", "idw": "IDW", "rf": "the random forest",
+                "hour_mean": "the hourly mean"}
+TABLE_NAMES = {"kriging": "Kriging", "idw": "IDW", "rf": "Random forest",
+               "hour_mean": "Hourly mean"}
+
+
+# @spec EVAL-ANOM-004
+def anomaly_answer(table: pd.DataFrame) -> str:
+    """Where kriging's skill comes from: its offset and anomaly shares, the anomaly and
+    hourly-mean correlations, the verdict, and beside it the variance-explained table."""
+    title = "**Where does kriging's skill come from?** "
+    t = table.set_index("method")
+    if not len(t) or "kriging" not in t.index or not t.loc["kriging", "n"]:
+        return title + (
+            "No hour has at least 5 unflagged matchups, so the error cannot be split into the "
+            "hour's common offset and the within-hour anomaly."
+        )
+    k = t.loc["kriging"]
+
+    def ci(row, name: str) -> str:
+        return _ci(row[name], row[f"{name}_ci_low"], row[f"{name}_ci_high"])
+
+    def pct(row, name: str) -> str:
+        return _pct_ci(row[name], row[f"{name}_ci_low"], row[f"{name}_ci_high"])
+
+    spatial = [m for m in ("kriging", "idw", "rf") if m in t.index]
+    corr = ", ".join(f"{ci(t.loc[m], 'anomaly_r')} for {METHOD_NAMES[m]}" for m in spatial)
+    source = skill_source(k["v_across"], k["across_explained"], k["v_within"],
+                          k["within_explained"])
+    others = [m for m in ("idw", "rf") if m in t.index]
+    level_note = (
+        f" (the hourly mean, which tracks only the level, explains "
+        f"{_pct(t.loc['hour_mean', 'across_explained'])})"
+        if "hour_mean" in t.index
+        else ""
+    )
+    pattern_note = (
+        " (" + ", ".join(f"{METHOD_NAMES[m]} {_pct(t.loc[m, 'within_explained'])}"
+                         for m in others) + ")"
+        if others
+        else ""
+    )
+    text = title + (
+        f"Over {int(k['n'])} unflagged matchups in {int(k['hours'])} hours with at least 5 "
+        f"monitors, the hour's common offset (the mean error across the monitors) is "
+        f"{pct(k, 'offset_share')} of kriging's MSE and the within-hour anomaly "
+        f"{pct(k, 'anomaly_share')}. Within the hour, the predicted anomalies correlate with "
+        f"the monitors' at r = {corr}; across hours, kriging's hourly mean tracks the monitors' "
+        f"at r = {ci(k, 'hourly_r')}. Kriging's skill comes mainly from {source}: it explains "
+        f"{_pct(k['across_explained'])} of the monitors' across-hour variance{level_note} and "
+        f"{_pct(k['within_explained'])} of their within-hour variance{pattern_note}. Variance "
+        f"explained, with day-bootstrap intervals (`anomaly.csv`):"
+    )
+    header = (
+        f"| Method | Across hours ({_pct(k['across_share'])} of monitor variance) | "
+        f"Within the hour ({_pct(k['within_share'])}) |"
+    )
+    rows = [
+        f"| {TABLE_NAMES[m]} | "
+        f"{pct(t.loc[m], 'across_explained')} | {pct(t.loc[m], 'within_explained')} |"
+        for m in ("kriging", "idw", "rf", "hour_mean")
+        if m in t.index
+    ]
+    table_lines = [header, "|---|---|---|", *rows]
+    return text + "\n\n" + "\n".join("   " + line for line in table_lines)
+
+
+# @spec EVAL-POOL-003
+def pooling_answer(table: pd.DataFrame) -> str:
+    """The pooled share's distribution, the raw and within-day differences with their signs and
+    per-10-point sizes, the effect across the interquartile range, and the leverage."""
+    title = "**What does the pooled fraction near a monitor do to the bias?** "
+    t = table.set_index("quantity")
+    needed = ("day", "day+hour_of_day", "raw_high_minus_low", "share_p25", "share_p75")
+    if not len(t) or any(q not in t.index or not _finite(t.loc[q, "estimate"]) for q in needed):
+        return title + "Too few matchups have a pooled share within 10 km to answer."
+    day, hod, raw = t.loc["day"], t.loc["day+hour_of_day"], t.loc["raw_high_minus_low"]
+    p25, p75 = t.loc["share_p25", "estimate"], t.loc["share_p75", "estimate"]
+    same = (raw["estimate"] > 0) == (day["estimate"] > 0)
+    distinguishable = all(
+        (r["ci_low"] > 0) or (r["ci_high"] < 0) for r in (day, hod)
+    )
+
+    def per10(r) -> str:
+        return _sci(r["estimate"] / 10, r["ci_low"] / 10, r["ci_high"] / 10)
+
+    leverage = (
+        "Leverage is low: three quarters of the matchups have under 10% pooled sensors "
+        "nearby, so no coefficient on the share can carry much of the bias."
+        if p75 < 0.10
+        else "Leverage is not low: at least a quarter of the matchups have 10% or more pooled "
+        "sensors nearby."
+    )
+    return title + (
+        f"The pooled share of kriging-input sensors within 10 km has mean "
+        f"{_pct(t.loc['share_mean', 'estimate'])}, quartiles {_pct(p25)} / "
+        f"{_pct(t.loc['share_p50', 'estimate'])} / {_pct(p75)}, and exactly 0 for "
+        f"{_pct(t.loc['share_zero', 'estimate'])} of the {int(day['n'])} matchups. Raw, the "
+        f"matchups above the median share differ in mean error from the rest by "
+        f"{_sci(raw['estimate'], raw['ci_low'], raw['ci_high'])} µg/m³ (high − low). "
+        f"With the day held fixed the sign is {'the same' if same else 'the opposite'}: "
+        f"error changes by {per10(day)} µg/m³ per 10 percentage points of pooled share with day "
+        f"effects ({_sci(day['estimate'], day['ci_low'], day['ci_high'])} per unit fraction), "
+        f"and {per10(hod)} with day and hour-of-day effects; "
+        + (
+            "both intervals exclude 0, so the within-day association is distinguishable from 0. "
+            if distinguishable
+            else "the intervals do not both exclude 0, so the within-day association is not "
+            "distinguishable from 0. "
+        )
+        + f"Across the interquartile range ({_pct(p25)} to {_pct(p75)}) the day-effects "
+        f"coefficient amounts to {_num(day['estimate'] * (p75 - p25))} µg/m³. {leverage} "
+        "(`pooling.csv`)"
+    )
+
+
+def _inflation_answer(c: dict) -> str | None:
+    cov = c["coverage_diagnostics"].set_index("kind")
+    if not len(cov):
+        return None
+    t, r, z = cov.loc["z_total"], cov.loc["z_total_raw"], cov.loc["z"]
+    sh = cov.loc["z_total_shared"]
+    sigma2, n_hours = c["shared"]
+    text = (
+        "**What inflation would make coverage nominal, and does a shared hourly offset close the "
+        "gap without peeking?** The total variance would need multiplying by "
+        f"{_ci(t['k68'], t['k68_ci_low'], t['k68_ci_high'])} for ±1 SD and "
+        f"{_ci(t['k95'], t['k95_ci_low'], t['k95_ci_high'])} for ±2 SD (kriging variance alone: "
+        f"{_num(z['k68'])} and {_num(z['k95'])}). Coverage ±1/±2 SD: kriging only "
+        f"{_pct(z['cov1'])}/{_pct(z['cov2'])}; total without the n / n_eff correction "
+        f"{_pct(r['cov1'])}/{_pct(r['cov2'])}; total with it "
+        f"{_pct_ci(t['cov1'], t['cov1_ci_low'], t['cov1_ci_high'])}/"
+        f"{_pct_ci(t['cov2'], t['cov2_ci_low'], t['cov2_ci_high'])} — the correction moves ±2 SD "
+        f"coverage by {_num(100 * (t['cov2'] - r['cov2']), 1)} points. A shared hourly offset of "
+        f"variance {_num(sigma2, 3)} (µg/m³)² ({n_hours} hours), estimated and scored on the same "
+        f"matchups, would bring it to {_pct(sh['cov1'])}/{_pct(sh['cov2'])}."
+    )
+    split = []
+    for kind, est, scored in (("z_total_shared_odd_on_even", "odd", "even"),
+                              ("z_total_shared_even_on_odd", "even", "odd")):
+        if kind not in cov.index:
+            continue
+        row = cov.loc[kind]
+        split.append(
+            f"estimated on {est} UTC days (σ²_shared {_num(row['shared_variance'], 3)} "
+            f"(µg/m³)², {_num(row['shared_hours'], 0)} hours) and scored on the {int(row['n'])} "
+            f"matchups of {scored} days, ±1/±2 SD coverage is "
+            f"{_pct_ci(row['cov1'], row['cov1_ci_low'], row['cov1_ci_high'])}/"
+            f"{_pct_ci(row['cov2'], row['cov2_ci_low'], row['cov2_ci_high'])}"
+        )
+    if split:
+        text += (
+            " Without the overlap — " + "; ".join(split) + " (68.3%/95.4% nominal). Neither "
+            "estimate is scored on the matchups it came from (diagnostic only; not added to the "
+            "total)."
+        )
+    return text + f" z_total has mean {_num(t['mean'])} and SD {_num(t['sd'])} (0 and 1 if right)."
+
+
+def _baselines_answer(c: dict) -> str:
     paired = c["paired"]
     overall = paired[paired["split"] == "overall"].set_index("baseline")
     b = c["baselines"]
@@ -480,135 +673,136 @@ def _plain_answers(c: dict) -> list[str]:
             f"({_beats(r['ci_low'], r['ci_high'])}; RMSE {_num(rmse.loc[name, 'rmse'])} vs "
             f"kriging {_num(rmse.loc['kriging', 'rmse'])})"
         )
-    lines += [
-        "1. **Does kriging beat the baselines?** Over the unflagged matchups, " + "; ".join(parts)
+    return (
+        "**Does kriging beat the baselines?** Over the unflagged matchups, " + "; ".join(parts)
         + ". Negative means kriging is closer to the monitor; a baseline is beaten only when "
-        "its interval lies wholly below 0 (`baseline_paired.csv`).",
-        "",
-    ]
-    # 2. Leave one monitor out
+        "its interval lies wholly below 0 (`baseline_paired.csv`)."
+    )
+
+
+def _lomo_answer(c: dict) -> str:
     s = c["lomo"]
-    if s["n"]:
-        bands = s["bands"].set_index("band")
-        band_text = ", ".join(
-            f"{band}: median {_ci(r['median'], r['median_ci_low'], r['median_ci_high'])} "
-            f"({int(r['rows'])} rows)"
-            for band, r in bands.iterrows()
+    if not s["n"]:
+        return "**Leave one monitor out** was not run (`lomo_hours` is 0)."
+    bands = s["bands"].set_index("band")
+    band_text = ", ".join(
+        f"{band}: median {_ci(r['median'], r['median_ci_low'], r['median_ci_high'])} "
+        f"({int(r['rows'])} rows)"
+        for band, r in bands.iterrows()
+    )
+    return (
+        "**How much does leave one monitor out worsen the error?** Median "
+        f"d = |error without the monitor| − |control error| = "
+        f"{_ci(s['median_d'], s['median_d_ci_low'], s['median_d_ci_high'])} µg/m³, mean "
+        f"{_ci(s['mean_d'], s['mean_d_ci_low'], s['mean_d_ci_high'])} µg/m³ over "
+        f"{s['n']} monitor-hours ({c['lomo_hours']} hours; intervals resample hours); worse "
+        f"in {_pct(s['share_worse'])} of them. RMSE control {_num(s['control_error'])} → "
+        f"without the monitor {_num(s['lomo_error'])} µg/m³. By sensors fitted to the "
+        f"monitor — {band_text}. "
+        + (
+            f"No row falls in band {', '.join(f'`{b}`' for b in s['empty_bands'])}. "
+            if s["empty_bands"]
+            else ""
         )
-        lines += [
-            "2. **How much does leave one monitor out worsen the error?** Median "
-            f"d = |error without the monitor| − |control error| = "
-            f"{_ci(s['median_d'], s['median_d_ci_low'], s['median_d_ci_high'])} µg/m³, mean "
-            f"{_ci(s['mean_d'], s['mean_d_ci_low'], s['mean_d_ci_high'])} µg/m³ over "
-            f"{s['n']} monitor-hours ({c['lomo_hours']} hours; intervals resample hours); worse "
-            f"in {_pct(s['share_worse'])} of them. RMSE control {_num(s['control_error'])} → "
-            f"without the monitor {_num(s['lomo_error'])} µg/m³. By sensors fitted to the "
-            f"monitor — {band_text}. "
-            + (
-                f"No row falls in band {', '.join(f'`{b}`' for b in s['empty_bands'])}. "
-                if s["empty_bands"]
-                else ""
-            )
-            + (
-                f"The medians {'rise' if s['dose_rises'] else 'do not rise'} with the count, "
-                f"and the `{s['dose_compared'][0]}` and `{s['dose_compared'][-1]}` intervals "
-                f"{'separate' if s['dose_separates'] else 'overlap'}"
-                + (", so the data show a dose-response."
-                   if s["dose_rises"] and s["dose_separates"]
-                   else ", so the data do not show a clear dose-response.")
-                if s["dose_compared"]
-                else "Too few bands have rows to test a dose-response."
-            ),
-            "",
-        ]
-    else:
-        lines += ["2. **Leave one monitor out** was not run (`lomo_hours` is 0).", ""]
-    # 3. Predicted level
+        + (
+            f"The medians {'rise' if s['dose_rises'] else 'do not rise'} with the count, "
+            f"and the `{s['dose_compared'][0]}` and `{s['dose_compared'][-1]}` intervals "
+            f"{'separate' if s['dose_separates'] else 'overlap'}"
+            + (", so the data show a dose-response."
+               if s["dose_rises"] and s["dose_separates"]
+               else ", so the data do not show a clear dose-response.")
+            if s["dose_compared"]
+            else "Too few bands have rows to test a dose-response."
+        )
+    )
+
+
+def _level_answer(c: dict) -> str | None:
     metrics = c["metrics"]
     low, high = _group(metrics, "pred_level", "first"), _group(metrics, "pred_level", "last")
     olow, ohigh = _group(metrics, "level", "first"), _group(metrics, "level", "last")
+    if low is None or high is None or olow is None or ohigh is None:
+        return None
     slopes = c["conditional"].set_index("slope")
     rel = slopes.loc["obs_on_surface"] if "obs_on_surface" in slopes.index else None
     verdict = smoothing_verdict(rel["ci_low"], rel["ci_high"]) if rel is not None else "unknown"
-    holds = (
-        clean_dirty_holds(low["bias_ci_low"], high["bias_ci_high"])
-        if low is not None and high is not None
-        else False
+    holds = clean_dirty_holds(low["bias_ci_low"], high["bias_ci_high"])
+    observed_spread = olow["bias"] - ohigh["bias"]
+    predicted_spread = low["bias"] - high["bias"]
+    ratio = predicted_spread / observed_spread if observed_spread else math.nan
+    size = (
+        f"a low-to-high spread of {_num(predicted_spread)} µg/m³ against {_num(observed_spread)} "
+        f"by observed level ({_pct(ratio)} of it)"
     )
-    if low is not None and high is not None and olow is not None and ohigh is not None:
-        lines += [
-            "3. **Does the level-dependent bias survive by predicted level?** By observed level "
-            f"the bias runs {_ci(olow['bias'], olow['bias_ci_low'], olow['bias_ci_high'])} "
-            f"({olow['group']}) to "
-            f"{_ci(ohigh['bias'], ohigh['bias_ci_low'], ohigh['bias_ci_high'])}"
-            f" ({ohigh['group']}) µg/m³, a split that produces that pattern even for an unbiased "
-            f"surface. By predicted level it runs "
-            f"{_ci(low['bias'], low['bias_ci_low'], low['bias_ci_high'])} ({low['group']}) to "
-            f"{_ci(high['bias'], high['bias_ci_low'], high['bias_ci_high'])} ({high['group']}). "
-            f"\"High in clean air, low in dirty air\" "
-            f"{'survives' if holds else 'does not survive'} the predicted-level split. The "
-            f"reliability slope (obs on surface) is "
-            f"{_ci(rel['estimate'], rel['ci_low'], rel['ci_high'])}: the surface is "
-            f"**{verdict}**.",
-            "",
-        ]
-    # 4. Inflation
-    cov = c["coverage_diagnostics"].set_index("kind")
-    if len(cov):
-        t, r, z = cov.loc["z_total"], cov.loc["z_total_raw"], cov.loc["z"]
-        sh = cov.loc["z_total_shared"]
-        sigma2, n_hours = c["shared"]
-        lines += [
-            "4. **What inflation would make coverage nominal?** The total variance would need "
-            f"multiplying by {_ci(t['k68'], t['k68_ci_low'], t['k68_ci_high'])} for ±1 SD and "
-            f"{_ci(t['k95'], t['k95_ci_low'], t['k95_ci_high'])} for ±2 SD (kriging variance "
-            f"alone: {_num(z['k68'])} and {_num(z['k95'])}). Coverage ±1/±2 SD: kriging only "
-            f"{_pct(z['cov1'])}/{_pct(z['cov2'])}; total without the n / n_eff correction "
-            f"{_pct(r['cov1'])}/{_pct(r['cov2'])}; total with it {_pct(t['cov1'])}/"
-            f"{_pct(t['cov2'])} — the correction moves ±2 SD coverage by "
-            f"{_num(100 * (t['cov2'] - r['cov2']), 1)} points. A shared hourly offset of "
-            f"variance {_num(sigma2, 3)} (µg/m³)² ({n_hours} hours) would bring it to "
-            f"{_pct(sh['cov1'])}/{_pct(sh['cov2'])} (diagnostic only). z_total has mean "
-            f"{_num(t['mean'])} and SD {_num(t['sd'])} (0 and 1 if right).",
-            "",
-        ]
-    # 5. Spikes
+    pattern = (
+        f"\"High in clean air, low in dirty air\" persists by predicted level — both band "
+        f"intervals exclude 0 — but at {size}."
+        if holds
+        else f"\"High in clean air, low in dirty air\" does not survive the predicted-level split "
+        f"({size})."
+    )
+    return (
+        "**Does the level-dependent bias survive by predicted level?** By observed level the "
+        f"bias runs {_sci(olow['bias'], olow['bias_ci_low'], olow['bias_ci_high'])} "
+        f"({olow['group']}) to {_sci(ohigh['bias'], ohigh['bias_ci_low'], ohigh['bias_ci_high'])}"
+        f" ({ohigh['group']}) µg/m³, a split that produces that pattern even for an unbiased "
+        f"surface. By predicted level it runs "
+        f"{_sci(low['bias'], low['bias_ci_low'], low['bias_ci_high'])} ({low['group']}) to "
+        f"{_sci(high['bias'], high['bias_ci_low'], high['bias_ci_high'])} ({high['group']}). "
+        f"{pattern} The reliability slope (obs on surface) is "
+        + (_ci(rel["estimate"], rel["ci_low"], rel["ci_high"]) if rel is not None else "—")
+        + f": the surface is **{verdict}**."
+    )
+
+
+def _spike_answer(c: dict) -> str:
     sp = c["spike_summary"]
     if sp["points"] == 0:
-        lines += ["5. **Spikes.** The spike rule flagged no kriging point in the window.", ""]
-    else:
-        day_text = "; ".join(
-            f"{r.day}: RMSE {_num(r.rmse)} → {_num(r.rmse_without)} µg/m³"
-            for r in sp["days"].itertuples(index=False)
-        )
-        h, u = sp["headline_all"], sp["headline_unaffected"]
-        lines += [
-            f"5. **How much of the affected days' error is the spikes?** The rule flagged "
-            f"{sp['points']} spike points in {sp['hours']} hours. Removing them (re-krige, "
-            f"diagnostic) changes the affected days' RMSE as: {day_text}. Headline RMSE "
-            f"{_num(h['rmse'])} µg/m³ with every hour, {_num(u['rmse'])} without the affected "
-            f"hours (bias {_num(h['bias'])} → {_num(u['bias'])}).",
+        return "**Spikes.** The spike rule flagged no kriging point in the window."
+    day_text = "; ".join(
+        f"{r.day}: RMSE {_num(r.rmse)} → {_num(r.rmse_without)} µg/m³"
+        for r in sp["days"].itertuples(index=False)
+    )
+    h, u = sp["headline_all"], sp["headline_unaffected"]
+    tiers = c["spike_tiers"]
+    tier_text = "; ".join(
+        f"{r.tier} µg/m³: {r.points} points in {r.hours} hours, bias {_num(r.bias)} → "
+        f"{_num(r.bias_without)} over {r.n} matchups (change "
+        f"{_ci(r.change, r.change_ci_low, r.change_ci_high)})"
+        for r in tiers.itertuples(index=False)
+        if r.points
+    )
+    return (
+        f"**How much of the affected days' error is the spikes?** The rule flagged "
+        f"{sp['points']} spike points in {sp['hours']} hours. Removing them (re-krige, "
+        f"diagnostic) changes the affected days' RMSE as: {day_text}. Headline RMSE "
+        f"{_num(h['rmse'])} µg/m³ with every hour, {_num(u['rmse'])} without the affected "
+        f"hours (bias {_num(h['bias'])} → {_num(u['bias'])}). By spike value, removing only "
+        f"that tier's points: {tier_text} (`spike_tiers.csv`)."
+    )
+
+
+# @spec EVAL-RUN-005, EVAL-BASE-005, EVAL-COND-003, EVAL-LOMO-007, EVAL-SPIKE-005
+def _plain_answers(c: dict) -> list[str]:
+    lines = ["## Plain answers", ""]
+    if c["kriged_hours"] == 0 or not len(c["matchups"]):
+        return lines + [
+            "No hour was kriged in the window, so none of the questions below (where kriging's "
+            "skill comes from, pooled share, inflation, baselines, leave one monitor out, "
+            "predicted level, spike) can be answered.",
             "",
         ]
-    # 6. Pooling
-    pool = c["pooling"].set_index("model")
-    if len(pool) and pool["coefficient"].notna().all():
-        supported = bool(((pool["ci_low"] > 0) | (pool["ci_high"] < 0)).all())
-        lines += [
-            "6. **Does the pooled fraction near a monitor drive the bias?** Error on the pooled "
-            "fraction of sensors within 10 km, day held fixed: "
-            + "; ".join(
-                f"{model} effects {_ci(r['coefficient'], r['ci_low'], r['ci_high'])} µg/m³ per "
-                "unit fraction"
-                for model, r in pool.iterrows()
-            )
-            + f" (n = {int(pool['n'].iloc[0])}). "
-            + ("Both intervals exclude 0, so the data support pooling as a driver of the bias."
-               if supported
-               else "The intervals do not both exclude 0, so the data do not support pooling "
-               "as a driver of the bias."),
-            "",
-        ]
+    answers = [
+        anomaly_answer(c["anomaly"]),
+        pooling_answer(c["pooling"]),
+        _inflation_answer(c),
+        _baselines_answer(c),
+        _lomo_answer(c),
+        _level_answer(c),
+        _spike_answer(c),
+    ]
+    for k, text in enumerate((a for a in answers if a), start=1):
+        lines += [f"{k}. {text}", ""]
     return lines
 
 
@@ -627,18 +821,23 @@ def _diagnostic_sections(c: dict) -> list[str]:
     cov = c["coverage_diagnostics"]
     if len(cov):
         lines += [
-            "| z | n | ±1 SD | ±2 SD | k for ±1 SD | k for ±2 SD | mean | SD |",
+            "| z | n | ±1 SD [95% CI] | ±2 SD [95% CI] | k for ±1 SD | k for ±2 SD | mean | SD |",
             "|---|---|---|---|---|---|---|---|",
         ]
         names = {
             "z": "kriging only",
             "z_total_raw": "total, OLS covariance",
             "z_total": "total, n / n_eff corrected",
-            "z_total_shared": "total + shared hourly offset (diagnostic)",
+            "z_total_shared": "total + shared hourly offset, in sample (diagnostic)",
+            "z_total_shared_odd_on_even": "total + shared offset from odd days, scored on even "
+            "days",
+            "z_total_shared_even_on_odd": "total + shared offset from even days, scored on odd "
+            "days",
         }
         for r in cov.itertuples(index=False):
             lines.append(
-                f"| {names[r.kind]} | {r.n} | {_pct(r.cov1)} | {_pct(r.cov2)} | "
+                f"| {names[r.kind]} | {r.n} | {_pct_ci(r.cov1, r.cov1_ci_low, r.cov1_ci_high)} | "
+                f"{_pct_ci(r.cov2, r.cov2_ci_low, r.cov2_ci_high)} | "
                 f"{_ci(r.k68, r.k68_ci_low, r.k68_ci_high)} | "
                 f"{_ci(r.k95, r.k95_ci_low, r.k95_ci_high)} | {_num(r.mean)} | {_num(r.sd)} |"
             )
@@ -648,8 +847,10 @@ def _diagnostic_sections(c: dict) -> list[str]:
             f"Shared hourly offset: σ²_shared = {_num(sigma2, 3)} (µg/m³)² from {n_hours} hours "
             "(the variance of the hour's mean calibration residual over fitted sensors, less "
             "its independent part). It is computed against the same monitors coverage is "
-            "scored at, so it is a diagnostic and is not added to the total. QQ plot: "
-            "`qq_ztotal.png`.",
+            "scored at, so it is a diagnostic and is not added to the total. The split-day rows "
+            "estimate it on the hours of odd (even) UTC days of the month and score the "
+            "matchups of even (odd) days, so no matchup is scored with an offset estimated from "
+            "it. QQ plot: `qq_ztotal.png`.",
             "",
         ]
     lines += ["## Conditional bias", ""]
@@ -685,12 +886,34 @@ def _diagnostic_sections(c: dict) -> list[str]:
             lines.append(f"| {_iso(r.hour)} | {r.n} | {_num(r.bias)} | {_num(r.rmse)} | "
                          f"{_num(r.bias_without)} | {_num(r.rmse_without)} |")
         lines += [""]
+        tiers = c["spike_tiers"]
+        lines += ["By spike value (`spike_tiers.csv`), each tier's points removed alone, over the "
+                  "unflagged matchups of the hours holding one, µg/m³:", "",
+                  "| Tier | Points | Hours | n | Bias | Bias without | Change [95% CI] |",
+                  "|---|---|---|---|---|---|---|"]
+        for r in tiers.itertuples(index=False):
+            lines.append(f"| {r.tier} | {r.points} | {r.hours} | {r.n} | {_num(r.bias)} | "
+                         f"{_num(r.bias_without)} | "
+                         f"{_ci(r.change, r.change_ci_low, r.change_ci_high)} |")
+        lines += [""]
     lines += ["## Pooling within the hour", ""]
     pool = c["pooling"]
     if len(pool):
-        lines += ["| Model | Coefficient [95% CI] | n |", "|---|---|---|"]
+        labels = {
+            "day": "coefficient, day effects (per unit fraction)",
+            "day+hour_of_day": "coefficient, day + hour-of-day effects (per unit fraction)",
+            "raw_high_minus_low": "raw mean error, above − at or below the median share",
+            "share_mean": "pooled share, mean",
+            "share_p25": "pooled share, 25th percentile",
+            "share_p50": "pooled share, median",
+            "share_p75": "pooled share, 75th percentile",
+            "share_zero": "pooled share, fraction exactly 0",
+        }
+        lines += ["| Quantity | Estimate [95% CI] | n |", "|---|---|---|"]
         for r in pool.itertuples(index=False):
-            lines.append(f"| {r.model} | {_ci(r.coefficient, r.ci_low, r.ci_high)} | {r.n} |")
+            digits = 3 if r.quantity.startswith("share") else 2
+            lines.append(f"| {labels.get(r.quantity, r.quantity)} | "
+                         f"{_ci(r.estimate, r.ci_low, r.ci_high, digits)} | {r.n} |")
         lines += ["", "Error regressed on the pooled fraction of kriging-input sensors within "
                   "10 km of the monitor, with fixed effects; intervals resample days.", ""]
     lines += ["## Variograms, timing, monitors", ""]
@@ -710,9 +933,44 @@ def _diagnostic_sections(c: dict) -> list[str]:
                   "(`variogram.csv`; metrics by class above)."]
     lag = c["lag"]
     if len(lag):
-        lines += ["- Timing (`lag.csv`): " + "; ".join(
-            f"lag {int(r.lag):+d} h r {_num(r.pearson_r)}, RMSE {_num(r.rmse)} (n {int(r.n)})"
-            for r in lag.itertuples(index=False)
-        ) + "."]
+        lines += [lag_lines(lag)]
     lines += ["- Per monitor: `per_monitor.csv`.", ""]
     return lines
+
+
+# @spec EVAL-LAG-002
+def lag_lines(lag: pd.DataFrame) -> str:
+    """The timestamp convention, each lag's fit, and whether any lag points to a misalignment."""
+    parts = []
+    for r in lag.itertuples(index=False):
+        text = f"lag {int(r.lag):+d} h r {_num(r.pearson_r)}, RMSE {_num(r.rmse)} (n {int(r.n)})"
+        if int(r.lag) != 0:
+            text += (
+                f", RMSE − lag 0 "
+                f"{_sci(r.rmse_difference, r.rmse_difference_ci_low, r.rmse_difference_ci_high)}"
+            )
+        parts.append(text)
+    rmse0 = lag.loc[lag["lag"] == 0, "rmse"]
+    rmse0 = float(rmse0.iloc[0]) if len(rmse0) else math.nan
+    better = [
+        r for r in lag.itertuples(index=False)
+        if int(r.lag) != 0 and _finite(r.rmse_difference_ci_high) and r.rmse_difference_ci_high < 0
+    ]
+    verdict = (
+        "No lag fits better than lag 0: no RMSE difference interval lies wholly below 0."
+        if not better
+        else " ".join(
+            f"Lag {int(r.lag):+d} h fits better by {_num(-r.rmse_difference)} µg/m³ "
+            f"({_pct(-r.rmse_difference / rmse0)} of the lag-0 RMSE)."
+            for r in better
+        )
+        + " The hour labels follow the convention above, so the better fit is not a labelling "
+        "error."
+    )
+    return (
+        "- Timing (`lag.csv`): both sides are labelled by the start of their hour. AirNow's hour "
+        "H is the monitor's average over [H, H + 1 h); the surface's hour H is kriged from "
+        "PurpleAir snapshots with `observed_at` in [H, H + 1 h) — with hourly collection, one "
+        "reading near H:30. Matchups pair them at the same H, with no shift. "
+        + "; ".join(parts) + ". " + verdict
+    )

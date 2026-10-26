@@ -18,7 +18,16 @@ from pyproj import Transformer
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.calibration.schemas import CalibrationSettings, hour_bound
-from aqdt.evaluation import baselines, budget, diagnostics, figures, lomo, report, spikes
+from aqdt.evaluation import (
+    anomaly,
+    baselines,
+    budget,
+    diagnostics,
+    figures,
+    lomo,
+    report,
+    spikes,
+)
 from aqdt.evaluation.calse import POOLED, rebuild_fits
 from aqdt.evaluation.decompose import REFERENCE_SD, detector_term, split_residual
 from aqdt.evaluation.matchups import cell_index
@@ -674,7 +683,7 @@ def _shared_residuals(contexts, stored_by_key, observations: pd.DataFrame) -> pd
 # @spec EVAL-IN-001, EVAL-IN-002, EVAL-IN-003, EVAL-MATCH-001, EVAL-MATCH-003, EVAL-MATCH-004
 # @spec EVAL-MATCH-005, EVAL-MATCH-006, EVAL-AVAIL-001, EVAL-AVAIL-002, EVAL-AVAIL-003
 # @spec EVAL-AVAIL-004, EVAL-FIG-001, EVAL-FIG-005, EVAL-RUN-001, EVAL-RUN-004, EVAL-BASE-003
-# @spec EVAL-IN-004, EVAL-SPIKE-003, EVAL-UNC-004
+# @spec EVAL-IN-004, EVAL-SPIKE-003, EVAL-UNC-004, EVAL-UNC-005, EVAL-SPIKE-005, EVAL-ANOM-003
 def evaluate(
     archive_uri: str | None,
     start: datetime,
@@ -753,7 +762,7 @@ def evaluate(
     matchups["inputs_reproduced"] = matchups["inputs_reproduced"].astype(bool)
 
     min_points = FusionSettings().min_points
-    spike_tables, spike_rows, affected = [], [], set()
+    spike_tables, spike_rows, tier_rows, affected = [], [], [], set()
     for c in contexts:
         mask = spikes.spike_mask(c.points.z)
         if not mask.any():
@@ -762,6 +771,9 @@ def evaluate(
         spike_tables.append(spikes.spike_points(c.hour, c.sensors, c.points))
         scored = matchups[matchups["hour"] == c.hour]
         spike_rows.append(spikes.rekrige(c.hour, c.points, mask, c.monitors, scored, min_points))
+        for tier, tier_mask in spikes.tier_masks(c.points.z).items():
+            rows_t = spikes.rekrige(c.hour, c.points, tier_mask, c.monitors, scored, min_points)
+            tier_rows.append(rows_t.assign(tier=tier))
     spike_points = (
         pd.concat(spike_tables, ignore_index=True)
         if spike_tables
@@ -771,6 +783,11 @@ def evaluate(
         pd.concat(spike_rows, ignore_index=True)
         if spike_rows
         else pd.DataFrame(columns=spikes.COLUMNS)
+    )
+    tier_table = (
+        pd.concat(tier_rows, ignore_index=True)
+        if tier_rows
+        else pd.DataFrame(columns=["tier", *spikes.COLUMNS])
     )
     _label_hours(matchups, contexts, affected)
 
@@ -821,6 +838,11 @@ def evaluate(
         if len(matchups)
         else pd.DataFrame(columns=baselines.PAIRED_COLUMNS)
     )
+    anomaly_table = (
+        anomaly.anomaly_table(matchups, settings.seed)
+        if len(matchups)
+        else pd.DataFrame(columns=anomaly.COLUMNS)
+    )
     lomo_table = (
         lomo.leave_one_monitor_out(
             archive_uri,
@@ -870,9 +892,10 @@ def evaluate(
 
     unflagged_rows = matchups[~matchups["flagged"]]
     scored = len(unflagged_rows) > 0
-    shared = diagnostics.shared_offset(_shared_residuals(contexts, stored_by_key, observations))
+    residuals = _shared_residuals(contexts, stored_by_key, observations)
+    shared = diagnostics.shared_offset(residuals)
     coverage_diag = (
-        diagnostics.coverage_diagnostics(unflagged_rows, settings.seed, shared[0])
+        diagnostics.coverage_diagnostics(unflagged_rows, settings.seed, shared[0], residuals)
         if scored
         else pd.DataFrame(columns=diagnostics.COVERAGE_COLUMNS)
     )
@@ -893,7 +916,7 @@ def evaluate(
     )
     per_monitor = diagnostics.per_monitor(matchups, availability)
     variogram = diagnostics.variogram_table(kriged)
-    lag = diagnostics.lag_table(matchups, observations)
+    lag = diagnostics.lag_table(matchups, observations, settings.seed)
     flag_rates = diagnostics.flag_rates(
         matchups,
         observations[observations["observed_at"].isin(kriged["hour"])]
@@ -901,6 +924,7 @@ def evaluate(
         else in_window,
     )
     spike_summary = spikes.spike_summary(matchups, spike_table, spike_points, affected)
+    spike_tiers = spikes.tier_summary(matchups, tier_table, spike_points, settings.seed)
 
     matchups.to_csv(out / "matchups.csv", index=False)
     metrics.to_csv(out / "metrics.csv", index=False)
@@ -915,10 +939,12 @@ def evaluate(
     sensitivity.to_csv(out / "variogram_sensitivity.csv", index=False)
     variogram.to_csv(out / "variogram.csv", index=False)
     coverage_diag.to_csv(out / "coverage_diagnostics.csv", index=False)
+    anomaly_table.to_csv(out / "anomaly.csv", index=False)
     reliability.to_csv(out / "reliability.csv", index=False)
     conditional.to_csv(out / "conditional_bias.csv", index=False)
     spike_points.to_csv(out / "spike_points.csv", index=False)
     spike_table.to_csv(out / "spikes.csv", index=False)
+    spike_tiers.to_csv(out / "spike_tiers.csv", index=False)
     pooling.to_csv(out / "pooling.csv", index=False)
     per_monitor.to_csv(out / "per_monitor.csv", index=False)
     lag.to_csv(out / "lag.csv", index=False)
@@ -981,6 +1007,8 @@ def evaluate(
         "reliability": reliability,
         "spike_points": spike_points,
         "spike_summary": spike_summary,
+        "spike_tiers": spike_tiers,
+        "anomaly": anomaly_table,
         "pooling": pooling,
         "variogram": variogram,
         "lag": lag,

@@ -457,12 +457,11 @@ def test_pooling_regression_recovers_a_planted_effect_with_day_effects():
                     "flagged": False,
                 }
             )
-    table = diagnostics.pooling_regression(pd.DataFrame(rows), seed=0).set_index("model")
-    assert list(table.index) == ["day", "day+hour_of_day"]
-    for model in table.index:
-        assert table.loc[model, "coefficient"] == pytest.approx(1.5, abs=0.15)
-        assert table.loc[model, "ci_low"] < table.loc[model, "coefficient"]
-        assert table.loc[model, "coefficient"] < table.loc[model, "ci_high"]
+    table = diagnostics.pooling_regression(pd.DataFrame(rows), seed=0).set_index("quantity")
+    for model in ("day", "day+hour_of_day"):
+        assert table.loc[model, "estimate"] == pytest.approx(1.5, abs=0.15)
+        assert table.loc[model, "ci_low"] < table.loc[model, "estimate"]
+        assert table.loc[model, "estimate"] < table.loc[model, "ci_high"]
         assert table.loc[model, "ci_high"] - table.loc[model, "ci_low"] < 0.5
         assert table.loc[model, "n"] == 1200
 
