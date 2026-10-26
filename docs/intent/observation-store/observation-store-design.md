@@ -351,6 +351,16 @@ unpopulated window is a normal state — so it logs the request at INFO and retu
 with the model's columns and dtypes. Frames are the read type; callers needing record models
 (rare — re-emitting rows with updated flags) convert with `Observation.from_frame(frame)`.
 
+`partition_objects(archive_uri, product, **filters) -> list[ObjectInfo]` lists, without reading
+them, the partition objects `read_partitioned` would read for the same filters, sorted by key: each
+`ObjectInfo` carries the object's `key` (relative to the archive root), `size` in bytes, and its
+`etag` and `last_modified` (UTC) where the filesystem reports them — S3 does, a local filesystem
+reports neither, and both are then `None`. It lets a reader record which version of the archive
+it read: the archive stores no ingest timestamp on rows, so an object's last modification is the
+latest time any of its rows could have been written or revised. `read_partitioned` selects its
+partitions through the same matching, so the two never disagree about which objects a filter
+covers.
+
 ## PostGIS Serving Layer
 
 ### Schema
@@ -452,7 +462,8 @@ src/aqdt/
     schemas.py     # Source, SiteType, QcFlag, Site, Observation, BoundingBox, IngestSummary (Pydantic)
     frames.py      # SitesFrame, ObservationsFrame (Pandera); *_to_frame builders; validate_partition
     products.py    # Product definition; the observation and site products
-    archive.py     # write_partitioned / read_partitioned, replace_object, observation/site wrappers
+    archive.py     # write_partitioned / read_partitioned / partition_objects, replace_object,
+                   # observation/site wrappers
     postgis.py     # apply_schema, load_partitions, rebuild
     sql/           # ordered schema files
   registry.py      # PRODUCTS: every product in the project, in load order

@@ -14,13 +14,38 @@ METRICS = [
     "mae",
     "rmse",
     "r2",
+    "pearson_r2",
     "pearson_r",
     "cov1_krig",
     "cov2_krig",
     "cov1_total",
     "cov2_total",
+    "cov1_total_raw",
+    "cov2_total_raw",
 ]
-SPLITS = ["overall", "level", "hour_of_day", "day", "pooled_band"]
+SPLITS = [
+    "overall",
+    "level",
+    "pred_level",
+    "hour_mean_points",
+    "hour_mean_obs",
+    "hour_of_day",
+    "day",
+    "pooled_band",
+    "spike_hour",
+    "spike_day",
+    "variogram",
+    "monitor",
+]
+# Splits read from a label column of the matchups; skipped when the column is absent.
+LABEL_COLUMNS = {
+    "hour_mean_points": "hour_mean_points_band",
+    "hour_mean_obs": "hour_mean_obs_band",
+    "spike_hour": "spike_hour",
+    "spike_day": "spike_day",
+    "variogram": "variogram",
+    "monitor": "site_id",
+}
 
 
 def _coverage(z: pd.Series, limit: float) -> float:
@@ -50,12 +75,15 @@ def matchup_metrics(frame: pd.DataFrame) -> dict[str, float | int]:
         out["pearson_r"] = float(np.corrcoef(surface, obs)[0, 1])
     else:
         out["pearson_r"] = math.nan
+    out["pearson_r2"] = out["pearson_r"] ** 2
     out["cov1_krig"] = _coverage(frame["z"], 1)
     out["cov2_krig"] = _coverage(frame["z"], 2)
-    total = frame.loc[frame["inputs_reproduced"].astype(bool), "z_total"]
-    out["cov1_total"] = _coverage(total, 1)
-    out["cov2_total"] = _coverage(total, 2)
-    return out
+    reproduced = frame["inputs_reproduced"].astype(bool)
+    for suffix, column in (("total", "z_total"), ("total_raw", "z_total_raw")):
+        z = frame.loc[reproduced, column] if column in frame else pd.Series(dtype=float)
+        out[f"cov1_{suffix}"] = _coverage(z, 1)
+        out[f"cov2_{suffix}"] = _coverage(z, 2)
+    return {k: out[k] for k in METRICS}
 
 
 # @spec EVAL-SPLIT-002
@@ -69,8 +97,9 @@ def level_group(obs: float) -> str:
 
 
 # @spec EVAL-SPLIT-003
-def pooled_bands(shares: pd.Series) -> pd.Series:
-    """Each hour's pooled-share tertile band, labelled with its edges; coinciding edges merge."""
+def tertile_bands(shares: pd.Series) -> pd.Series:
+    """Each value's tertile band, labelled with its edges; coinciding edges merge."""
+    shares = shares.astype(float)
     if shares.empty:
         return pd.Series(dtype=object, index=shares.index)
     if shares.nunique() <= 1:
@@ -85,12 +114,21 @@ def pooled_bands(shares: pd.Series) -> pd.Series:
     return banded.astype(str)
 
 
+def pooled_bands(shares: pd.Series) -> pd.Series:
+    """Each hour's pooled-share tertile band (``tertile_bands`` over the hourly shares)."""
+    return tertile_bands(shares)
+
+
 def _groups(frame: pd.DataFrame, split: str, bands: pd.Series) -> pd.Series:
     hours = pd.to_datetime(frame["hour"], utc=True)
     if split == "overall":
         return pd.Series("all", index=frame.index)
     if split == "level":
         return frame["obs"].map(level_group)
+    if split == "pred_level":
+        return tertile_bands(frame["surface"])
+    if split in LABEL_COLUMNS:
+        return frame[LABEL_COLUMNS[split]].astype(str)
     if split == "hour_of_day":
         return hours.dt.hour.map(lambda h: f"{h:02d}")
     if split == "day":
@@ -99,9 +137,21 @@ def _groups(frame: pd.DataFrame, split: str, bands: pd.Series) -> pd.Series:
     return hours.map(lambda h: lookup.get(h, "none"))
 
 
-# @spec EVAL-SPLIT-001, EVAL-SPLIT-002, EVAL-SPLIT-004
-def metric_table(matchups: pd.DataFrame, bands: pd.Series) -> pd.DataFrame:
-    """One long table: ``subset`` (``unflagged`` then ``all``) × ``split`` × ``group``."""
+def _row(frame: pd.DataFrame, seed: int) -> dict:
+    from aqdt.evaluation.bootstrap import metric_intervals
+
+    return {**matchup_metrics(frame), **metric_intervals(frame, seed)}
+
+
+def _available(frame: pd.DataFrame, split: str) -> bool:
+    return split not in LABEL_COLUMNS or LABEL_COLUMNS[split] in frame.columns
+
+
+# @spec EVAL-SPLIT-001, EVAL-SPLIT-002, EVAL-SPLIT-004, EVAL-METRIC-003
+def metric_table(matchups: pd.DataFrame, bands: pd.Series, seed: int = 0) -> pd.DataFrame:
+    """One long table: ``subset`` (``unflagged`` then ``all``) × ``split`` × ``group``, every
+    metric with its day-bootstrap interval."""
+    from aqdt.evaluation.bootstrap import INTERVAL_METRICS
     rows = []
     subsets = {
         "unflagged": matchups[~matchups["flagged"].astype(bool)] if len(matchups) else matchups,
@@ -112,8 +162,10 @@ def metric_table(matchups: pd.DataFrame, bands: pd.Series) -> pd.DataFrame:
             if frame.empty:
                 if split == "overall":
                     rows.append(
-                        {"subset": subset, "split": split, "group": "all", **matchup_metrics(frame)}
+                        {"subset": subset, "split": split, "group": "all", **_row(frame, seed)}
                     )
+                continue
+            if not _available(frame, split):
                 continue
             groups = _groups(frame, split, bands)
             for group in sorted(groups.unique()):
@@ -122,7 +174,8 @@ def metric_table(matchups: pd.DataFrame, bands: pd.Series) -> pd.DataFrame:
                         "subset": subset,
                         "split": split,
                         "group": group,
-                        **matchup_metrics(frame[groups == group]),
+                        **_row(frame[groups == group], seed),
                     }
                 )
-    return pd.DataFrame(rows, columns=["subset", "split", "group", *METRICS])
+    intervals = [f"{m}_ci_{side}" for m in INTERVAL_METRICS for side in ("low", "high")]
+    return pd.DataFrame(rows, columns=["subset", "split", "group", *METRICS, *intervals])

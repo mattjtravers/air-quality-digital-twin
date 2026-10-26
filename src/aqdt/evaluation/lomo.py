@@ -26,8 +26,19 @@ COLUMNS = [
     "control_error",
     "lomo_error",
     "n_fitted_to_x",
+    "n_to_pooled",
+    "n_to_other_monitor",
+    "n_uncalibrated",
     "n_changed",
+    "nearest_sensor_km",
+    "pooled_share",
 ]
+BANDS = ["0", "1–5", ">5"]
+BAND_COLUMNS = [
+    "band", "rows", "median", "mean", "median_ci_low", "median_ci_high", "mean_ci_low",
+    "mean_ci_high",
+]
+SANITY_LIMIT = 0.5  # µg/m³
 _CALIBRATED = (FitStatus.fitted.value, FitStatus.pooled.value)
 
 
@@ -117,6 +128,19 @@ class _Refits:
         return self._fits[key]
 
 
+# @spec EVAL-LOMO-004
+def fitted_moves(control_rows: pd.DataFrame, without_rows: pd.DataFrame, x: str) -> tuple:
+    """Where the sensors fitted to ``x`` in the control went without ``x``: ``(pooled, fitted to
+    another monitor, uncalibrated or missing)``."""
+    to_x = (control_rows["status"] == FitStatus.fitted.value) & (control_rows["ref_site_id"] == x)
+    status = without_rows.loc[to_x, "status"]
+    pooled = int((status == FitStatus.pooled.value).sum())
+    other = int(
+        ((status == FitStatus.fitted.value) & (without_rows.loc[to_x, "ref_site_id"] != x)).sum()
+    )
+    return pooled, other, int(to_x.sum()) - pooled - other
+
+
 def _fit_rows(calibrated: pd.DataFrame, fits: pd.DataFrame) -> pd.DataFrame:
     """Each of the hour's sensor rows with its refit's ``status`` and ``ref_site_id``."""
     keys = calibrated[["site_id", "fit_as_of"]].assign(
@@ -179,6 +203,9 @@ def leave_one_monitor_out(
             changed = (control_rows["status"].fillna("") != without_rows["status"].fillna("")) | (
                 control_rows["ref_site_id"].fillna("") != without_rows["ref_site_id"].fillna("")
             )
+            to_pooled, to_other, to_none = fitted_moves(
+                control_rows, without_rows, monitor.site_id
+            )
             rows.append(
                 {
                     "hour": hour,
@@ -194,23 +221,133 @@ def leave_one_monitor_out(
                             & (control_rows["ref_site_id"] == monitor.site_id)
                         ).sum()
                     ),
+                    "n_to_pooled": to_pooled,
+                    "n_to_other_monitor": to_other,
+                    "n_uncalibrated": to_none,
                     "n_changed": int(changed.sum()),
+                    "nearest_sensor_km": float(m["nearest_sensor_km"]),
+                    "pooled_share": float(m["pooled_share"]),
                 }
             )
         log.info("leave one monitor out %s: %d monitors", hour.isoformat(), len(context.monitors))
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
-def lomo_statistics(table: pd.DataFrame) -> dict[str, float]:
-    """Over the unflagged rows: the RMSE of each error column, and the median of
-    ``|lomo_error| − |control_error|`` with the number of rows it is taken over."""
-    rows = table[~table["flagged"].astype(bool)] if len(table) else table
-    out: dict[str, float] = {}
+def dose_band(n_fitted: int) -> str:
+    """The ``n_fitted_to_x`` band: ``0``, ``1–5``, ``>5``."""
+    if n_fitted == 0:
+        return "0"
+    return "1–5" if n_fitted <= 5 else ">5"
+
+
+def _unflagged(table: pd.DataFrame) -> pd.DataFrame:
+    return table[~table["flagged"].astype(bool)] if len(table) else table
+
+
+def _with_d(table: pd.DataFrame) -> pd.DataFrame:
+    rows = _unflagged(table)
+    both = rows.dropna(subset=["control_error", "lomo_error"]) if len(rows) else rows
+    if not len(both):
+        return both.assign(d=pd.Series(dtype=float))
+    return both.assign(d=both["lomo_error"].abs() - both["control_error"].abs())
+
+
+def _hour_intervals(rows: pd.DataFrame, seed: int) -> dict[str, float]:
+    from aqdt.evaluation.bootstrap import block_interval
+
+    d = rows["d"].to_numpy(dtype=float)
+    blocks = pd.to_datetime(rows["hour"], utc=True).astype("int64").to_numpy()
+    med = block_interval(blocks, lambda idx: float(np.median(d[idx])), seed)
+    mean = block_interval(blocks, lambda idx: float(d[idx].mean()), seed)
+    return {
+        "median_ci_low": med[0],
+        "median_ci_high": med[1],
+        "mean_ci_low": mean[0],
+        "mean_ci_high": mean[1],
+    }
+
+
+# @spec EVAL-LOMO-004, EVAL-LOMO-005, EVAL-LOMO-006, EVAL-LOMO-007
+def lomo_statistics(table: pd.DataFrame, seed: int = 0) -> dict:
+    """Over the unflagged rows: the RMSE of each error column; the control's agreement with the
+    stored surface; ``d = |lomo_error| − |control_error|`` — mean and median with hour-bootstrap
+    intervals, the share worse, and the dose-response bands of ``n_fitted_to_x``."""
+    rows = _unflagged(table)
+    out: dict = {}
     for column in ("stored_error", "control_error", "lomo_error"):
         values = rows[column].dropna().to_numpy(dtype=float) if len(rows) else np.array([])
         out[column] = float(np.sqrt((values**2).mean())) if len(values) else np.nan
-    both = rows.dropna(subset=["control_error", "lomo_error"]) if len(rows) else rows
-    difference = (both["lomo_error"].abs() - both["control_error"].abs()) if len(both) else []
-    out["median_difference"] = float(np.median(difference)) if len(both) else np.nan
+
+    sane = rows.dropna(subset=["control_error", "stored_error"]) if len(rows) else rows
+    gap = (sane["control_error"] - sane["stored_error"]).abs() if len(sane) else pd.Series([])
+    out["sanity_median"] = float(gap.median()) if len(gap) else np.nan
+    out["sanity_max"] = float(gap.max()) if len(gap) else np.nan
+    out["sanity_rows"] = (
+        [(h, s) for h, s in zip(sane.loc[gap > SANITY_LIMIT, "hour"],
+                                sane.loc[gap > SANITY_LIMIT, "site_id"])]
+        if len(sane)
+        else []
+    )
+
+    both = _with_d(table)
+    d = both["d"].to_numpy(dtype=float)
     out["n"] = len(both)
+    out["median_difference"] = float(np.median(d)) if len(d) else np.nan
+    out["median_d"] = out["median_difference"]
+    out["mean_d"] = float(d.mean()) if len(d) else np.nan
+    out["share_worse"] = float((d > 0).mean()) if len(d) else np.nan
+    ci = _hour_intervals(both, seed) if len(d) else dict.fromkeys(BAND_COLUMNS[4:], np.nan)
+    out["median_d_ci_low"], out["median_d_ci_high"] = ci["median_ci_low"], ci["median_ci_high"]
+    out["mean_d_ci_low"], out["mean_d_ci_high"] = ci["mean_ci_low"], ci["mean_ci_high"]
+
+    bands = []
+    labels = both["n_fitted_to_x"].map(dose_band) if len(both) else pd.Series(dtype=object)
+    for band in BANDS:
+        part = both[labels == band] if len(both) else both
+        values = part["d"].to_numpy(dtype=float)
+        intervals = (
+            _hour_intervals(part, seed) if len(values) else dict.fromkeys(BAND_COLUMNS[4:], np.nan)
+        )
+        bands.append(
+            {
+                "band": band,
+                "rows": len(values),
+                "median": float(np.median(values)) if len(values) else np.nan,
+                "mean": float(values.mean()) if len(values) else np.nan,
+                **intervals,
+            }
+        )
+    out["bands"] = pd.DataFrame(bands, columns=BAND_COLUMNS)
+    present = [b for b in bands if b["rows"]]
+    medians = [b["median"] for b in present]
+    out["empty_bands"] = [b["band"] for b in bands if not b["rows"]]
+    out["dose_rises"] = bool(
+        len(medians) >= 2
+        and all(a <= b for a, b in zip(medians, medians[1:]))
+        and medians[-1] > medians[0]
+    )
+    out["dose_separates"] = bool(
+        len(present) >= 2 and present[0]["median_ci_high"] < present[-1]["median_ci_low"]
+    )
+    out["dose_compared"] = (present[0]["band"], present[-1]["band"]) if len(present) >= 2 else ()
     return out
+
+
+# @spec EVAL-LOMO-007
+def lomo_by_monitor(table: pd.DataFrame) -> pd.DataFrame:
+    """Per monitor over its unflagged rows with both errors: rows, median ``d``, and the mean
+    number of sensors fitted to it."""
+    columns = ["site_id", "n", "median_d", "mean_n_fitted_to_x"]
+    both = _with_d(table)
+    if not len(both):
+        return pd.DataFrame(columns=columns)
+    grouped = both.groupby("site_id", sort=True)
+    return pd.DataFrame(
+        {
+            "site_id": list(grouped.groups),
+            "n": grouped["d"].size().to_numpy(),
+            "median_d": grouped["d"].median().to_numpy(),
+            "mean_n_fitted_to_x": grouped["n_fitted_to_x"].mean().to_numpy(),
+        },
+        columns=columns,
+    )

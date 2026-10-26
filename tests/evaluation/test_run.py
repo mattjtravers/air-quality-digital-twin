@@ -39,10 +39,22 @@ FILES = [
     "fit_uncertainty.csv",
     "montecarlo.csv",
     "lomo.csv",
+    "lomo_by_monitor.csv",
     "baselines.csv",
+    "baseline_paired.csv",
     "decomposition.csv",
     "variogram_sensitivity.csv",
+    "variogram.csv",
+    "coverage_diagnostics.csv",
+    "reliability.csv",
+    "conditional_bias.csv",
+    "spike_points.csv",
+    "spikes.csv",
+    "pooling.csv",
+    "per_monitor.csv",
+    "lag.csv",
     "error_budget.csv",
+    "figures.md",
     "summary.md",
     "run.json",
 ]
@@ -54,8 +66,13 @@ FIGURES = [
     "decomposition",
     "mc_vs_analytic",
     "error_budget",
+    "lomo_rmse",
+    "baselines_rmse",
+    "reliability",
+    "qq_ztotal",
     "maps_pm25",
     "maps_sd",
+    "maps_pm25_10",
 ]
 
 
@@ -230,8 +247,12 @@ def test_a_window_with_no_kriged_hour_still_writes_a_report(archive, tmp_path, c
     assert len(_csv((tmp_path,), "matchups.csv")) == 0
     assert "no hour was kriged" in (tmp_path / "summary.md").read_text().lower()
     assert not (tmp_path / "maps_pm25.png").exists()
-    for name in ("lomo.csv", "baselines.csv"):
+    for name in ("lomo.csv", "baselines.csv", "baseline_paired.csv", "spikes.csv",
+                 "spike_points.csv", "pooling.csv", "reliability.csv", "per_monitor.csv"):
         assert len(_csv((tmp_path,), name)) == 0, name
+    for name in FILES:
+        assert (tmp_path / name).exists(), name
+    assert not (tmp_path / "maps_pm25_10.png").exists()
 
 
 # --- Calibration uncertainty ------------------------------------------------------------------
@@ -348,7 +369,7 @@ def test_maps_and_clipping_are_reported(report):
     assert "pm25_max" in text and "sd_max" in text
 
 
-# @spec EVAL-RUN-001, EVAL-RUN-002
+# @spec EVAL-RUN-001, EVAL-RUN-002, EVAL-BASE-006, EVAL-SPLIT-005
 def test_report_files_and_summary_contents(report):
     out, summary = report
     for name in FILES:
@@ -367,8 +388,26 @@ def test_report_files_and_summary_contents(report):
         "baselines",
         "idw",
         "random forest",
+        "r² (squared correlation)",
+        "r² (skill, 1 − sse/ss_obs)",
+        "observed-conditioned",
+        "spatial hold-out",
+        "no baseline is built from a monitor value",
     ):
         assert phrase in text, phrase
+
+
+# @spec EVAL-RUN-005, EVAL-FLAG-001, EVAL-UNC-004, EVAL-SPLIT-005
+def test_summary_opens_with_the_plain_answers(report):
+    text = (report[0] / "summary.md").read_text()
+    head = text.split("## ")[1].lower()
+    assert head.startswith("plain answers")
+    for phrase in ("baselines", "leave one monitor out", "predicted level", "inflation",
+                   "spike", "pooled"):
+        assert phrase in head, phrase
+    lower = text.lower()
+    assert "flagged share of airnow observations" in lower and "flagged share of matchups" in lower
+    assert "λᵀ m σ_s mᵀ λ" in lower and "n / n_eff" in lower
 
 
 # @spec EVAL-RUN-003
@@ -379,7 +418,14 @@ def test_run_json_records_provenance(report, archive):
     assert {"window_start", "window_end", "evaluation_settings", "map_settings", "version"} <= set(
         meta
     )
-    assert "git_commit" in meta
+    for key in ("git_commit", "git_dirty", "git_diff_sha256", "matchups_sha256", "airnow_objects",
+                "airnow_last_modified", "airnow_manifest_sha256"):
+        assert key in meta, key
+    digest = hashlib.sha256((report[0] / "matchups.csv").read_bytes()).hexdigest()
+    assert meta["matchups_sha256"] == digest
+    assert meta["airnow_objects"] > 0
+    assert meta["airnow_last_modified"] is None  # a local archive reports no modification time
+    assert len(meta["airnow_manifest_sha256"]) == 64
 
 
 # --- Leave one monitor out --------------------------------------------------------------------
@@ -393,7 +439,12 @@ LOMO_COLUMNS = [
     "control_error",
     "lomo_error",
     "n_fitted_to_x",
+    "n_to_pooled",
+    "n_to_other_monitor",
+    "n_uncalibrated",
     "n_changed",
+    "nearest_sensor_km",
+    "pooled_share",
 ]
 
 
@@ -438,6 +489,20 @@ def test_removing_a_monitor_moves_the_sensors_fitted_to_it(archive, lomo_rows):
     assert lomo_rows["n_fitted_to_x"].sum() > 0
     moved = lomo_rows[lomo_rows["n_fitted_to_x"] > 0]
     assert (moved["lomo_error"] != moved["control_error"]).any()
+    went = lomo_rows["n_to_pooled"] + lomo_rows["n_to_other_monitor"] + lomo_rows["n_uncalibrated"]
+    assert (went == lomo_rows["n_fitted_to_x"]).all()
+
+
+# @spec EVAL-LOMO-004, EVAL-LOMO-007
+def test_lomo_rows_carry_the_matchup_context_and_a_per_monitor_table(report, lomo_rows, matchups):
+    merged = lomo_rows.merge(matchups, on=["hour", "site_id"], suffixes=("", "_m"))
+    assert merged["nearest_sensor_km"].to_numpy() == pytest.approx(
+        merged["nearest_sensor_km_m"].to_numpy()
+    )
+    assert merged["pooled_share"].to_numpy() == pytest.approx(merged["pooled_share_m"].to_numpy())
+    by_monitor = _csv(report, "lomo_by_monitor.csv")
+    assert list(by_monitor.columns) == ["site_id", "n", "median_d", "mean_n_fitted_to_x"]
+    assert set(by_monitor["site_id"]) <= set(lomo_rows["site_id"])
 
 
 # @spec EVAL-LOMO-001, EVAL-BUDGET-003
@@ -464,15 +529,95 @@ def test_the_dependence_row_carries_the_lomo_median(report):
 
 # @spec EVAL-BASE-001, EVAL-BASE-002, EVAL-BASE-003
 def test_baselines_are_matchup_columns_and_a_comparison_table(report, matchups):
-    assert matchups["idw"].notna().all() and matchups["rf"].notna().all()
+    for column in ("idw", "rf", "hour_mean", "hour_median"):
+        assert matchups[column].notna().all(), column
     assert ((matchups["idw"] - matchups["obs"]).abs() < 10).all()
-    table = _csv(report, "baselines.csv").set_index(["method", "subset"])
-    assert set(table.index) == {
-        (m, s) for m in ("kriging", "idw", "rf") for s in ("unflagged", "all")
+    per_hour = matchups.groupby("hour")[["hour_mean", "points_mean"]].nunique()
+    assert (per_hour == 1).all().all()
+    assert matchups["hour_mean"].to_numpy() == pytest.approx(matchups["points_mean"].to_numpy())
+    table = _csv(report, "baselines.csv")
+    overall_rows = table[table["split"] == "overall"].set_index(["method", "subset"])
+    assert set(overall_rows.index) == {
+        (m, s)
+        for m in ("kriging", "hour_mean", "hour_median", "idw", "rf")
+        for s in ("unflagged", "all")
     }
     headline = _csv(report, "metrics.csv")
     overall = headline[(headline["subset"] == "unflagged") & (headline["split"] == "overall")]
-    kriging = table.loc[("kriging", "unflagged")]
+    kriging = overall_rows.loc[("kriging", "unflagged")]
     assert kriging["n"] == overall["n"].iloc[0]
     assert kriging["rmse"] == pytest.approx(overall["rmse"].iloc[0])
-    assert table.loc[("idw", "all"), "n"] == len(matchups)
+    assert overall_rows.loc[("idw", "all"), "n"] == len(matchups)
+    paired = _csv(report, "baseline_paired.csv")
+    assert set(paired["baseline"]) == {"hour_mean", "hour_median", "idw", "rf"}
+
+
+# --- Tightened evaluation -----------------------------------------------------------------------
+
+
+# @spec EVAL-MATCH-007, EVAL-UNC-001
+def test_matchups_carry_points_mean_pooled_share_10km_and_raw_calibration_variance(matchups):
+    for column in ("points_mean", "pooled_share_10km", "cal_variance_raw", "z_total_raw"):
+        assert column in matchups.columns, column
+    assert matchups["points_mean"].notna().all()
+    share = matchups["pooled_share_10km"].dropna()
+    assert ((share >= 0) & (share <= 1)).all()
+    both = matchups.dropna(subset=["cal_variance", "cal_variance_raw"])
+    assert len(both) and (both["cal_variance_raw"] <= both["cal_variance"] + 1e-12).all()
+    expected = both["error"] / np.sqrt(both["variance"] + both["cal_variance_raw"])
+    assert both["z_total_raw"].to_numpy() == pytest.approx(expected.to_numpy())
+
+
+# @spec EVAL-METRIC-003, EVAL-SPLIT-002, EVAL-SPLIT-004
+def test_metric_table_has_pearson_r2_new_splits_and_interval_columns(report):
+    table = _csv(report, "metrics.csv")
+    columns = list(table.columns)
+    assert columns.index("pearson_r2") == columns.index("r2") + 1
+    assert "rmse_ci_low" in columns and "cov2_total_raw_ci_high" in columns
+    assert {"pred_level", "hour_mean_points", "hour_mean_obs", "spike_hour", "spike_day",
+            "variogram", "monitor"} <= set(table["split"])
+    assert table["rmse_ci_low"].isna().all()  # the synthetic window is a single day
+
+
+# @spec EVAL-COND-001, EVAL-COND-002, EVAL-UNC-002, EVAL-UNC-003, EVAL-UNC-004
+def test_conditional_bias_and_coverage_diagnostics_are_written(report):
+    reliability = _csv(report, "reliability.csv")
+    assert reliability["n"].sum() == (~_csv(report, "matchups.csv")["flagged"]).sum()
+    slopes = _csv(report, "conditional_bias.csv")
+    assert set(slopes["slope"]) == {"obs_on_surface", "surface_on_obs"}
+    coverage = _csv(report, "coverage_diagnostics.csv")
+    assert list(coverage["kind"]) == ["z", "z_total_raw", "z_total", "z_total_shared"]
+    assert "shared_variance" in coverage.columns
+
+
+# @spec EVAL-SPIKE-001, EVAL-SPIKE-002, EVAL-SPIKE-003
+def test_a_window_without_spikes_writes_empty_spike_tables(report, matchups):
+    points = _csv(report, "spike_points.csv")
+    assert list(points.columns) == ["hour", "site_ids", "z", "median", "mad"] and len(points) == 0
+    rows = _csv(report, "spikes.csv")
+    assert len(rows) == 0 and "delta" in rows.columns
+    assert set(matchups["spike_hour"]) == {"other"} and set(matchups["spike_day"]) == {"other"}
+
+
+# @spec EVAL-POOL-001, EVAL-MON-001, EVAL-VARIO-001, EVAL-LAG-001, EVAL-IN-004
+def test_further_diagnostics_are_written(report, matchups):
+    pooling = _csv(report, "pooling.csv")
+    assert list(pooling["model"]) == ["day", "day+hour_of_day"]
+    per_monitor = _csv(report, "per_monitor.csv")
+    assert set(per_monitor["site_id"]) == set(INSIDE)
+    variogram = _csv(report, "variogram.csv")
+    counts = variogram[variogram["quantity"] == "class_count"]["value"].sum()
+    assert counts == len(KRIGED)
+    lag = _csv(report, "lag.csv").set_index("lag")
+    assert list(lag.index) == [-1, 0, 1]
+    assert lag.loc[0, "n"] == (~matchups["flagged"]).sum()
+    # the reads extend an hour past the window, but matchups stay inside it
+    assert set(matchups["hour"]) <= set(KRIGED)
+    assert lag.loc[-1, "n"] > 0
+
+
+# @spec EVAL-FIG-006, EVAL-FIG-007
+def test_figures_md_numbers_a_caption_for_every_figure(report):
+    text = (report[0] / "figures.md").read_text()
+    for k, name in enumerate(FIGURES, start=1):
+        assert f"Figure {k}" in text and f"{name}.png" in text, name

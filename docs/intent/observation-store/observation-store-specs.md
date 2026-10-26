@@ -80,6 +80,7 @@ frame models), `ARCHIVE` (GeoParquet archive layout, writes, reads, and the part
 - [x] **OBS-ARCHIVE-018**: When `read_sites(archive_uri, source=None)` is called, the observation store shall return a validated `SitesFrame` GeoDataFrame of every site whose source matches `source` (all sources when `None`).
 - [x] **OBS-ARCHIVE-019**: When a read matches no partition, the observation store shall log an INFO message naming the archive URI, source, and window requested, and return an empty frame with the model's columns and dtypes rather than raising.
 - [x] **OBS-ARCHIVE-020**: Every archive file the observation store writes shall be readable as a standard GeoParquet file by GeoPandas (`read_parquet`) without importing project code, yielding the same rows and a `geometry` column in EPSG:4326.
+- [x] **OBS-ARCHIVE-031**: When `partition_objects(archive_uri, product, **filters)` is called, the observation store shall return, without reading their contents and sorted by key, one `ObjectInfo` per partition object that `read_partitioned` would read for the same filters, with `key` relative to the archive root, `size` in bytes, and `etag` and `last_modified` (UTC) where the filesystem reports them and `None` otherwise.
 - [D] **OBS-ARCHIVE-021**: The observation store shall record a `schema_version` entry in each archive file's Parquet metadata so that a later incompatible `Observation` change can detect and migrate older partitions.
 
 ## PostGIS Serving Layer

@@ -124,7 +124,9 @@ def test_metric_table_has_both_subsets_and_every_split():
     table = metrics.metric_table(frame, bands)
     assert list(table.columns[:3]) == ["subset", "split", "group"]
     assert set(table["subset"]) == {"unflagged", "all"}
-    assert set(table["split"]) == {"overall", "level", "hour_of_day", "day", "pooled_band"}
+    assert set(table["split"]) == {
+        "overall", "level", "pred_level", "hour_of_day", "day", "pooled_band"
+    }  # the labelled splits (monitor, spike, variogram, hour means) need their columns
     overall = table[(table["split"] == "overall")].set_index("subset")
     assert overall.loc["unflagged", "n"] == 3 and overall.loc["all", "n"] == 4
     days = table[(table["subset"] == "all") & (table["split"] == "day")]

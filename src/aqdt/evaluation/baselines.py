@@ -1,17 +1,35 @@
-"""Baselines scored at the same matchups as the surface: inverse-distance weighting and a random
-forest, each from the hour's kriging points only."""
+"""Baselines scored at the same matchups as the surface: the hour's mean and median,
+inverse-distance weighting, and a random forest, each from the hour's kriging points only; and the
+paired comparison of kriging against each."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from aqdt.evaluation.metrics import matchup_metrics
+from aqdt.evaluation.bootstrap import days, mean_interval, metric_intervals
+from aqdt.evaluation.metrics import level_group, matchup_metrics, tertile_bands
 
 FEATURES = ["x", "y", "hour_of_day", "median"]
-METHODS = {"kriging": "surface", "idw": "idw", "rf": "rf"}
-BASE_METRICS = ["n", "bias", "mae", "rmse", "r2", "pearson_r"]
-COLUMNS = ["method", "subset", *BASE_METRICS]
+METHODS = {
+    "kriging": "surface",
+    "hour_mean": "hour_mean",
+    "hour_median": "hour_median",
+    "idw": "idw",
+    "rf": "rf",
+}
+BASELINES = ["hour_mean", "hour_median", "idw", "rf"]
+BASE_METRICS = ["n", "bias", "mae", "rmse", "r2", "pearson_r2", "pearson_r"]
+INTERVALS = [f"{m}_ci_{side}" for m in BASE_METRICS[1:] for side in ("low", "high")]
+COLUMNS = ["method", "subset", "split", "group", *BASE_METRICS, *INTERVALS]
+PAIRED_COLUMNS = ["baseline", "split", "group", "n", "mean_difference", "ci_low", "ci_high"]
+
+
+# @spec EVAL-BASE-004
+def hour_level(pz: np.ndarray) -> tuple[float, float]:
+    """The hour's zero-skill prediction: the mean and the median of its point values."""
+    pz = np.asarray(pz, dtype=float)
+    return float(pz.mean()), float(np.median(pz))
 
 
 # @spec EVAL-BASE-001
@@ -62,24 +80,77 @@ def predict_forest(model, points: pd.DataFrame, query: pd.DataFrame) -> np.ndarr
     return model.set_params(n_jobs=1).predict(features(query, points))
 
 
+def _split_groups(frame: pd.DataFrame) -> dict[str, pd.Series]:
+    """``overall``, observed ``level``, and ``pred_level`` (always the kriging surface's band)."""
+    return {
+        "overall": pd.Series("all", index=frame.index),
+        "level": frame["obs"].map(level_group),
+        "pred_level": tertile_bands(frame["surface"]),
+    }
+
+
 # @spec EVAL-BASE-003
-def baseline_table(matchups: pd.DataFrame) -> pd.DataFrame:
-    """The accuracy metrics of each method (``kriging`` is the stored surface) over the
-    ``unflagged`` and ``all`` matchups."""
+def baseline_table(matchups: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
+    """The accuracy metrics and their day-bootstrap intervals of each method (``kriging`` is the
+    stored surface) over the ``unflagged`` and ``all`` matchups, overall and by observed and
+    predicted level."""
     subsets = {"unflagged": matchups[~matchups["flagged"].astype(bool)], "all": matchups}
     rows = []
     for method, column in METHODS.items():
         for subset, frame in subsets.items():
-            scored = pd.DataFrame(
-                {
-                    "obs": frame["obs"].to_numpy(dtype=float),
-                    "surface": frame[column].to_numpy(dtype=float),
-                }
-            )
-            scored["error"] = scored["surface"] - scored["obs"]
-            scored["z"] = np.nan
-            scored["z_total"] = np.nan
-            scored["inputs_reproduced"] = False
-            m = matchup_metrics(scored)
-            rows.append({"method": method, "subset": subset, **{k: m[k] for k in BASE_METRICS}})
+            for split, groups in _split_groups(frame).items():
+                for group in sorted(groups.unique()):
+                    part = frame[groups == group]
+                    scored = pd.DataFrame(
+                        {
+                            "hour": part["hour"].to_numpy(),
+                            "obs": part["obs"].to_numpy(dtype=float),
+                            "surface": part[column].to_numpy(dtype=float),
+                        }
+                    )
+                    scored["error"] = scored["surface"] - scored["obs"]
+                    scored["z"] = np.nan
+                    scored["z_total"] = np.nan
+                    scored["inputs_reproduced"] = False
+                    m = matchup_metrics(scored)
+                    ci = metric_intervals(scored, seed)
+                    rows.append(
+                        {
+                            "method": method,
+                            "subset": subset,
+                            "split": split,
+                            "group": group,
+                            **{k: m[k] for k in BASE_METRICS},
+                            **{k: ci[k] for k in INTERVALS},
+                        }
+                    )
     return pd.DataFrame(rows, columns=COLUMNS)
+
+
+# @spec EVAL-BASE-005
+def paired_table(matchups: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
+    """Per baseline and group of the unflagged matchups: the mean of ``|kriging error| −
+    |baseline error|`` with its day-bootstrap interval; negative means kriging is closer."""
+    frame = matchups[~matchups["flagged"].astype(bool)]
+    rows = []
+    obs = frame["obs"].to_numpy(dtype=float)
+    kriging = np.abs(frame["surface"].to_numpy(dtype=float) - obs)
+    for baseline in BASELINES:
+        difference = kriging - np.abs(frame[baseline].to_numpy(dtype=float) - obs)
+        for split, groups in _split_groups(frame).items():
+            for group in sorted(groups.unique()):
+                mask = (groups == group).to_numpy()
+                d = difference[mask]
+                lo, hi = mean_interval(days(frame.loc[mask, "hour"]), d, seed)
+                rows.append(
+                    {
+                        "baseline": baseline,
+                        "split": split,
+                        "group": group,
+                        "n": int(mask.sum()),
+                        "mean_difference": float(d.mean()) if len(d) else np.nan,
+                        "ci_low": lo,
+                        "ci_high": hi,
+                    }
+                )
+    return pd.DataFrame(rows, columns=PAIRED_COLUMNS)

@@ -36,16 +36,22 @@ Principles, in order of precedence when they conflict:
    propagated as a covariance, never as independent per-sensor noise.
 5. **Deterministic.** Given the archive, the window, and the seed, every table and figure is
    identical.
+6. **Every number carries its uncertainty.** Matchups within a day share weather and are not
+   independent, so every reported statistic comes with a 95% interval from a bootstrap that
+   resamples whole days (§ Confidence intervals), and a claim is stated as supported only when its
+   interval excludes the null value.
 
 ## Inputs
 
 All inputs come from the archive through the observation store's primitives (`read_partitioned`,
-`read_observations`, `read_sites`) and the surface rasters by their `surface_uri`:
+`read_observations`, `read_sites`, and `partition_objects` for provenance) and the surface rasters
+by their `surface_uri`:
 
 - **Surface fits** — fusion's `surface_fits` rows for the window; rows with `status = kriged`
   carry the variogram parameters and the raster's URI.
 - **Surface rasters** — band 1 (`pm25`) and band 2 (`pm25_variance`) of each kriged hour.
-- **AirNow observations** — `pm25_raw` and `qc_flags` per monitor hour.
+- **AirNow observations** — `pm25_raw` and `qc_flags` per monitor hour, over the window extended
+  by one hour each side for the timing-alignment lags.
 - **Sites** — coordinates of sensors and monitors.
 - **Calibrated sensor hours** — calibration's `calibrated_hourly`: `pm25_corrected_mean`,
   `pm25_calibrated`, `fit_status`, `fit_as_of` per sensor hour.
@@ -73,8 +79,11 @@ every AirNow observation at `H` whose monitor lies inside the grid:
 | `error`, `z` | `surface − obs`; `error / sd` (null when `sd = 0`) |
 | `nearest_sensor_km` | distance from the monitor to the nearest of the hour's kriging points |
 | `n_sensors`, `pooled_share`, `fitted_share` | the hour's kriging-input sensors, and the fraction of them with `fit_status` `pooled` and `fitted` |
+| `pooled_share_10km` | the fraction of the hour's kriging-input sensors within 10 km of the monitor whose `fit_status` is `pooled`; null when none is within 10 km |
 | `cal_variance` | the calibration-uncertainty contribution at the monitor (§ Total uncertainty), (µg/m³)² |
 | `total_variance`, `total_sd`, `z_total` | `variance + cal_variance`, its square root, `error / total_sd` |
+| `cal_variance_raw`, `z_total_raw` | the same with the fit covariance not inflated by `n / n_eff` (§ Coverage diagnostics) |
+| `points_mean` | the mean of the hour's kriging-point values |
 | `inputs_reproduced` | whether the hour's kriging inputs rebuilt from the archive match the surface fit's `n_sensors` and `n_points` |
 
 The cell containing the monitor is found by inverting the raster's geotransform at the monitor's
@@ -106,27 +115,87 @@ For any set of matchups:
 | `bias` | mean of `error` |
 | `mae` | mean of `|error|` |
 | `rmse` | square root of the mean of `error²` |
-| `r2` | `1 − Σ error² / Σ (obs − mean obs)²` — the surface as a predictor of the monitor; can be negative |
+| `r2` | R², the skill score `1 − Σ error² / Σ (obs − mean obs)²` — the surface as a predictor of the monitor; can be negative |
 | `pearson_r` | Pearson correlation of `surface` and `obs` |
+| `pearson_r2` | `pearson_r²`, the squared correlation; equals `r2` only when the OLS line of `obs` on `surface` is the 1:1 line |
 | `cov1_krig`, `cov2_krig` | fraction of matchups with `|z| ≤ 1`, `≤ 2`, among those with `sd > 0` |
 | `cov1_total`, `cov2_total` | fraction with `|z_total| ≤ 1`, `≤ 2`, among those with `total_sd > 0` and `inputs_reproduced` |
+| `cov1_total_raw`, `cov2_total_raw` | the same with `z_total_raw` |
 
-`r2` and `pearson_r` are null for fewer than two matchups or zero variance. Gaussian errors with a
-correct variance would give 68.3% and 95.4% coverage.
+`r2`, `pearson_r`, and `pearson_r2` are null for fewer than two matchups or zero variance.
+Gaussian errors with a correct variance would give 68.3% and 95.4% coverage. The report labels
+`r2` "R² (skill, 1 − SSE/SS_obs)" and `pearson_r2` "r² (squared correlation)" wherever both
+appear, since the two are easily confused and differ whenever the surface is biased or its slope
+against the monitors is not 1.
 
 **Subsets.** Every metric table is computed twice: `unflagged` (matchups with `flagged` false —
 the headline) and `all`.
 
 **Splits.** Within each subset, metrics are reported overall and split by:
 
-- **PM2.5 level** of `obs`: `<5`, `5–9` (5 ≤ obs ≤ 9), `>9` µg/m³;
+- **observed level** (`level`) of `obs`: `<5`, `5–9` (5 ≤ obs ≤ 9), `>9` µg/m³;
+- **predicted level** (`pred_level`): tertiles of `surface` over the subset's matchups;
+- **hour level from the sensors** (`hour_mean_points`): tertiles of the hour's `points_mean` over
+  the window's kriged hours;
+- **hour level from the monitors** (`hour_mean_obs`, labelled *observed-conditioned*): tertiles of
+  the hour's mean monitor `obs` over the window's kriged hours with a matchup;
 - **UTC hour of day**, 0–23;
 - **calendar day** (UTC date of `hour`);
-- **pooled-share band**: tertiles of the hourly `pooled_share` across the window's kriged hours,
-  each labelled with its edges; edges that coincide (many hours with the same share) are merged,
-  so there may be fewer than three bands.
+- **pooled-share band**: tertiles of the hourly `pooled_share` across the window's kriged hours;
+- **spike hour** (`spike_hour`): `affected` or `other` (§ Spikes);
+- **spike day** (`spike_day`): `affected` when the UTC day holds an affected hour, else `other`;
+- **variogram** (`variogram`): the hour's class, `pure_nugget`, `short_range`, or `regular`
+  (§ Variograms);
+- **monitor** (`monitor`): the matchup's `site_id`.
 
-One long table holds them all: `subset`, `split`, `group`, then the metrics.
+Tertile bands are labelled with their edges; edges that coincide (many values the same) are
+merged, so there may be fewer than three bands.
+
+A split by observed level conditions on the outcome: a monitor reading is its true value plus
+measurement noise, so the matchups in the lowest observed band are, on average, those whose noise
+was negative, and the highest those whose noise was positive. Even a perfect, unbiased surface
+then shows positive error in the low band and negative in the high band. The predicted-level and
+sensor-hour-level splits condition on quantities that do not contain the monitor's own value, so
+a level-dependent bias that survives in them is a property of the surface; the observed-level and
+observed-conditioned splits are kept beside them for comparison.
+
+One long table holds them all: `subset`, `split`, `group`, then the metrics and their intervals.
+
+### Confidence intervals
+
+Every metric of a metric table row is given a 95% interval, `<metric>_ci_low` and
+`<metric>_ci_high`, from a block bootstrap over UTC days: each of 1000 resamples draws the row's
+days with replacement (as many as it has) and recomputes the metric over the matchups of the drawn
+days; the interval is the 2.5th and 97.5th percentile of the resampled values. The generator is
+seeded with `seed`. Resampling days rather than matchups keeps each day's shared weather and
+shared calibration error together, so the interval reflects how many independent days the number
+rests on. A row whose matchups fall on fewer than two days has null intervals — the `day` split
+always does. The resamples are computed from per-day sums (count, error, absolute error, squared
+error, `obs`, `surface` and their squares and cross-product, coverage counts), so each resample is
+a weighted sum and the whole table's intervals are cheap.
+
+The same day bootstrap, with the same seed, gives the intervals of every other statistic the
+report states with one — paired differences, slopes, regression coefficients, bin means — except
+leave one monitor out, which resamples its hours (§ Leave one monitor out).
+
+## Conditional bias
+
+Whether the surface reads high in clean air and low in dirty air is answered on the unflagged
+matchups from quantities that do not condition on the monitor's value:
+
+- **Reliability.** Matchups are binned into deciles of `surface`; each bin reports its count, its
+  mean `surface`, and its mean `obs` with a day-bootstrap 95% interval. A calibrated surface puts
+  the bin means on the 1:1 line.
+- **Slopes.** The OLS slope of `obs` on `surface` and of `surface` on `obs`, each with a
+  day-bootstrap interval. The first is the reliability slope: 1 for a calibrated surface, above 1
+  when the surface is **over-smoothed** (its highs too low and its lows too high), below 1 when it
+  is **over-dispersed**. The second falls below 1 for any imperfect predictor, by regression to the
+  mean, and is shown for comparison with the observed-level split.
+
+The summary states the verdict from these rules: over-smoothed when the reliability slope's
+interval lies above 1, over-dispersed when it lies below 1, otherwise not distinguishable from
+calibrated; and "high in clean air, low in dirty air" holds only when the lowest `pred_level`
+band's bias interval lies above 0 and the highest band's below 0.
 
 ## Availability
 
@@ -252,6 +321,40 @@ draws (default 500). Only hours with `inputs_reproduced` are sampled; when fewer
 The report compares Monte Carlo with analytic `cal_variance` per matchup (ratio and scatter). The
 analytic value is used for every hour; the Monte Carlo is its check.
 
+### Coverage diagnostics
+
+The calibration variance at a monitor, stated in one line in the summary: each sensor's
+calibrated value carries its fit's parameter variance `[1, x] C [1, x]ᵀ` plus the fit's residual
+variance `σ̂²` (the diagonal of `Σ_s`); two pooled sensors of the same `as_of` share the pooled
+fit's parameter error (the off-diagonal); and the kriging weights carry it to the monitor as
+`λᵀ M Σ_s Mᵀ λ`. `C` is the OLS covariance inflated by `n / n_eff`.
+
+When total coverage falls short of nominal, the report shows where the shortfall sits:
+
+- **Three coverages.** Kriging variance alone (`z`); total with the uninflated OLS covariance
+  (`z_total_raw`, from `cal_variance_raw`, the same propagation with the uncorrected `C`); total
+  with the `n / n_eff` inflation (`z_total`). The difference between the last two is the effect of
+  the serial-correlation correction.
+- **Inflation factor.** For each of `z`, `z_total_raw`, and `z_total`, the factor `k` by which the
+  variance would have to be multiplied for the observed coverage to be nominal:
+  `k₆₈ = q₀.₆₈₃(|z|)²` and `k₉₅ = (q₀.₉₅₄(|z|) / 2)²`, where `q_p` is the empirical quantile, with
+  day-bootstrap intervals; and the mean and SD of `z` and `z_total`, which are 0 and 1 for a
+  correct, unbiased variance.
+- **QQ plot.** `z_total` against standard-normal quantiles, showing whether the shortfall is a
+  scale (a straight line steeper than 1:1) or heavy tails (curvature at the ends).
+- **Shared hourly offset (diagnostic only).** The candidate the model omits is a calibration error
+  common to every sensor in the same hour — humidity or aerosol composition the correction does
+  not capture. For each kriged hour, `r_i = pm25_calibrated − obs` over the hour's kriging-input
+  sensors with `fit_status` `fitted`, `obs` being the unflagged reading at the hour of the sensor's
+  `ref_site_id`; the hour's offset is `s_H = mean r_i`. Its variance across hours, less the part
+  the hours' independent residuals contribute, `σ²_shared = var_H(s_H) − mean_H(var_i(r_i) /
+  n_H)` (floored at 0, over hours with at least two such sensors), is reported, with the coverage
+  `total_variance + σ²_shared` would give — the kriging weights sum to 1, so a common offset passes
+  to the monitor whole. It is a diagnostic: the residuals are computed against the same monitors
+  the coverage is scored at, so it is not added to the reported total.
+- **Coverage by group** comes from the metric table's splits: predicted level, day, spike hour,
+  and spike day.
+
 ### Caveats stated with the totals
 
 - The variogram's nugget absorbs part of the sensors' measurement scatter, so the kriging variance
@@ -341,17 +444,27 @@ each is written as a CSV of the same name.
 | `decomposition` | stacked bar of (a), (b), (c) shares, fitted and pooled, at both reference bounds |
 | `mc_vs_analytic` | Monte Carlo against analytic `cal_variance`, with the 1:1 line |
 | `error_budget` | the error budget as a table |
+| `lomo_rmse` | per monitor, the RMSE of the stored, control, and without-monitor errors over its LOMO rows, side by side |
+| `baselines_rmse` | RMSE and bias of kriging and each baseline (unflagged, overall) with their intervals |
+| `reliability` | mean `obs` per `surface` decile with its interval, against the 1:1 line, bins labelled with their counts |
+| `qq_ztotal` | `z_total` quantiles against standard-normal quantiles, with the 1:1 line |
 | `maps_pm25`, `maps_sd` | the same four hours, estimate and standard deviation, each on its fixed scale (§ Maps) |
+| `maps_pm25_10` | the same four hours' estimate on a 0–10 µg/m³ scale |
 
-Accuracy figures use the `unflagged` subset.
+Accuracy figures use the `unflagged` subset. `figures.md` lists every figure written, numbered in
+the order of the table above, each with a one-sentence caption stating what it shows and the
+subset and units.
 
-**Maps.** Four hours are chosen from the window's kriged hours — on four different days, one from
-each quartile of the hour's mean monitor `obs`, relaxing the distinct days when too few qualify
-and taking every kriged hour when there are fewer than four — and drawn as small multiples through the maps
+**Maps.** Four hours are chosen from the window's kriged hours whose variogram class is
+`regular` (from all kriged hours when none is) — on four different days, one from each quartile of
+the hour's mean monitor `obs`, relaxing the distinct days when too few qualify and taking every
+candidate hour when there are fewer than four — and drawn as small multiples through the maps
 component, sensors and monitors overlaid, with a shared colorbar; the same four hours are drawn
-again as standard deviation on its own fixed scale. The report states the window's
-maximum surface value and maximum SD against the maps' fixed limits, and the fraction of cells
-above each.
+again as standard deviation on its own fixed scale, and again as the estimate with `pm25_max = 10`
+so clean-air hours use more of the colour range. Each figure keeps one fixed scale across its
+panels. A pure-nugget hour is a flat surface, so it says nothing about spatial structure and is
+not shown. The report states the window's maximum surface value and maximum SD against the maps'
+fixed limits, and the fraction of cells above each.
 
 ## Report
 
@@ -365,25 +478,66 @@ fit_uncertainty.csv     per (site_id, fit_as_of): status, n, n_eff, ρ₁, Var(a
                         corrected and uncorrected; σ̂²; stored vs rebuilt n_pairs, slope, intercept
 montecarlo.csv          per sampled matchup: analytic, Monte Carlo, Monte Carlo (pooled independent)
 lomo.csv                per (LOMO hour, monitor): stored, control, and without-monitor errors
-baselines.csv           kriging, IDW, random forest × subset, accuracy metrics
+lomo_by_monitor.csv     per monitor: LOMO rows, median d
+baselines.csv           method × subset × split × group: accuracy metrics and intervals
+baseline_paired.csv     per baseline and group: mean |kriging error| − |baseline error|, interval
 decomposition.csv       (a), (b), (c) and shares, by fit status and reference bound
 variogram_sensitivity.csv
+variogram.csv           variogram classes, models, range percentiles
+coverage_diagnostics.csv  per z kind: coverages, inflation factors, mean and SD; shared offset
+conditional_bias.csv    reliability and reverse slopes with intervals
+spike_points.csv        each spike point
+spikes.csv              per (affected hour, monitor): control and without-spike errors
+pooling.csv             the fixed-effects coefficients
+per_monitor.csv
+lag.csv
 error_budget.csv
 <figure>.png, <figure>.csv
-summary.md              key numbers and caveats
-run.json                window, settings, seed, archive URI, package version, git commit if known
+figures.md              numbered figure captions
+summary.md              plain answers, key numbers, and caveats
+run.json                provenance (below)
 ```
+
+`run.json` records the window, the evaluation and map settings, the seed, the archive URI, the
+package version, and the provenance a reader needs to reproduce or trust the numbers:
+
+- `git_commit` (HEAD), `git_dirty` (whether the working tree differs from HEAD, untracked files
+  included), and, when dirty, `git_diff_sha256` — the SHA-256 of `git diff HEAD` — so a dirty run
+  is identifiable; all null when the code is not running from a git checkout;
+- `matchups_sha256`, the SHA-256 of `matchups.csv` as written;
+- for the AirNow observation objects the run read (through the observation store's
+  `partition_objects`): `airnow_objects` (their count), `airnow_last_modified` (the latest object
+  modification, the latest time any AirNow value the run scored against could have been revised;
+  null when the archive does not report it), and `airnow_manifest_sha256` (SHA-256 over the
+  objects' sorted `key`, `etag`, `size`, and `last_modified`, null fields omitted — on a local
+  archive it covers key and size only).
 
 It writes nothing to the archive and returns the headline numbers. `aqdt evaluate --start --end
 --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]` runs it from the command line (the pipeline
 segment owns the CLI; this command is on-demand, has no routine window and no workflow).
 
-**Summary.** `summary.md` states: hours and days available and the gaps; headline metrics
-(`unflagged`) and the `all` equivalents; coverage with kriging SD and with total SD; the Monte
-Carlo to analytic ratio; the decomposition shares; the maps' clipping; the LOMO and baseline
-comparisons; and the caveats — AirNow
-data are preliminary, sample sizes per split, weather differs between days, and the monitors are
-calibration targets for nearby sensors, so the check is not fully independent of the surface.
+**Summary.** `summary.md` opens with **plain answers** — one short paragraph each, stating the
+number and its interval and a verdict from the rules in the sections above:
+
+1. Does kriging beat the hourly-mean, IDW, and random-forest baselines, and by how much (the
+   paired differences)?
+2. How much does leave one monitor out worsen the error at the monitors, and does the effect grow
+   with the number of sensors fitted to the monitor?
+3. Does the level-dependent bias survive when split by predicted level (and is the surface
+   over-smoothed or over-dispersed)?
+4. What variance inflation would make coverage nominal, and how much do the shared hourly offset
+   and the `n / n_eff` correction change it?
+5. How much of the affected days' error do the spikes account for?
+6. Does the pooled fraction near a monitor, with the day held fixed, support pooling as a cause of
+   bias?
+
+It then states: hours and days available and the gaps; headline metrics (`unflagged`) and the
+`all` equivalents, with intervals; the flag rate with both denominators; coverage three ways; the
+calibration-variance formula; the Monte Carlo to analytic ratio; the decomposition shares; the
+conditional-bias, spike, pooling, variogram, and lag results; the maps' clipping; the LOMO and
+baseline comparisons; and the caveats — AirNow data are preliminary, sample sizes per split,
+weather differs between days, and the monitors are calibration targets for nearby sensors, so the
+check is not fully independent of the surface.
 
 Settings (`EvaluationSettings`, Pydantic settings from the environment): `AQDT_EVAL_MC_HOURS`
 (default 24), `AQDT_EVAL_MC_DRAWS` (default 500), `AQDT_EVAL_LOMO_HOURS` (default 6),
@@ -427,16 +581,38 @@ no refit is treated as `uncalibrated`.
 
 `lomo.csv` holds one row per (hour, `X`): `hour`, `site_id`, `obs`, `flagged`, `stored_error`,
 `control_error`, `lomo_error` (each `prediction − obs`), `n_fitted_to_x` (the control's `fitted`
-sensors referencing `X`), and `n_changed` (sensors whose refit status or reference differs between
-control and without-`X`). The summary reports, over the unflagged rows, the RMSE of each error
-column and the median of `|lomo_error| − |control_error|`; that median fills the error budget's
-"monitors as calibration targets" magnitude.
+sensors referencing `X`), `n_to_pooled`, `n_to_other_monitor`, and `n_uncalibrated` (what those
+`n_fitted_to_x` sensors became in the without-`X` refit: `pooled`, `fitted` against another
+monitor, or `uncalibrated`), `n_changed` (sensors whose refit status or reference differs between
+control and without-`X`), and the matchup's `nearest_sensor_km` and `pooled_share`.
+
+Over the unflagged rows, with `d = |lomo_error| − |control_error|` (positive when removing `X`
+made the prediction at `X` worse), the report gives:
+
+- the RMSE of each error column;
+- a **sanity check** on the control: the median and maximum of `|control_error − stored_error|`.
+  Both should be near zero; a large value means the archive has moved since the surface was
+  written (AirNow revisions after the stored fit, a re-applied calibration) or the refitted
+  variogram differs from the stored one, and the summary says which rows exceed 0.5 µg/m³;
+- the mean and median of `d`, each with a 95% interval from a bootstrap that resamples the LOMO
+  hours, and the share of rows with `d > 0`;
+- `d` per monitor (`lomo_by_monitor.csv`: rows, median `d`, mean `n_fitted_to_x`);
+- `d` by `n_fitted_to_x` band — `0`, `1–5`, `>5` — with median, mean, and hour-bootstrap intervals,
+  and a dose-response statement: the dependence the check measures predicts `d ≈ 0` at monitors
+  no sensor is fitted to and growing `d` with the count, and the summary says whether the medians
+  rise across the bands and whether the intervals of the lowest and highest bands with rows
+  separate, naming any band with no rows (a monitor with no sensor fitted to it in an hour leaves
+  the `0` band empty).
+
+The median `d` fills the error budget's "monitors as calibration targets" magnitude.
 
 ## Baselines
 
-Two simple predictors are scored at the same matchups, so kriging's skill reads against
-something:
+Simple predictors are scored at the same matchups, so kriging's skill reads against something:
 
+- **Hourly mean and median** (zero skill in space). The mean, and the median, of the hour's
+  kriging-point values, predicted at every monitor alike. A spatial method that does not beat
+  these adds nothing beyond the hour's level.
 - **Inverse-distance weighting.** Power 2 over the hour's kriging points at the monitor's
   coordinates; a point at distance 0 gives that point's value (the mean, if several).
 - **Random forest.** scikit-learn's `RandomForestRegressor` with `random_state = seed`, 200
@@ -445,9 +621,87 @@ something:
   and the point value as target; it predicts each matchup from the monitor's `x`, `y`, the hour
   of day, and the hour's median point value.
 
-Neither predictor sees a monitor value. The predictions are columns `idw` and `rf` of
-`matchups.csv`; `baselines.csv` holds the EVAL-METRIC-001 metrics of `kriging` (the stored
-surface), `idw`, and `rf`, for the `unflagged` and `all` subsets, over the same matchups.
+No baseline sees a monitor value: each is built from the kriging points alone, and the forest is
+trained on point values only. The forest is trained on the same hours it predicts, so its
+comparison is a spatial hold-out, not a hold-out in time; the summary says both.
+
+The predictions are columns `hour_mean`, `hour_median`, `idw`, and `rf` of `matchups.csv`.
+`baselines.csv` holds, for `kriging` (the stored surface) and each baseline, the accuracy metrics
+(`n`, `bias`, `mae`, `rmse`, `r2`, `pearson_r`, `pearson_r2`) and their day-bootstrap intervals,
+for the `unflagged` and `all` subsets, overall and split by observed level and predicted level
+(the predicted level always that of the kriging `surface`, so every method is scored on the same
+groups).
+
+**Paired comparison.** For each baseline `B` and each matchup, `|kriging error| − |B error|`;
+`baseline_paired.csv` gives its mean with a day-bootstrap interval, over the unflagged matchups,
+overall and per observed-level and predicted-level group. Negative means kriging is closer to the
+monitor; kriging "beats" `B` only when the interval lies below 0.
+
+## Spikes
+
+A single sensor can read far above its neighbours with both channels agreeing, pass every QC check,
+and set the surface's maximum. Evaluation finds such points with a rule applied to each kriged
+hour's kriging points (values `z`, after co-located sensors are merged), names no sensor in
+advance, and measures what they cost — a diagnostic only; the stored surfaces and the pipeline are
+untouched.
+
+- **Spike point.** A point whose `z` exceeds the hour's median point value by more than
+  `5 × 1.4826 × MAD` (MAD the median absolute deviation of the hour's point values, 1.4826 scaling
+  it to a normal SD) **and** exceeds 20 µg/m³. The absolute floor keeps clean-air hours, whose MAD
+  can be a fraction of a µg/m³, from flagging ordinary points.
+- **Affected hour.** A kriged hour with at least one spike point; an **affected day** is a UTC day
+  holding an affected hour. They form the `spike_hour` and `spike_day` splits.
+- **Re-krige.** For each affected hour, the monitors are predicted twice with `select_variogram`
+  and the clamp at 0, as leave one monitor out does: a control on all the hour's points, and once
+  with the spike points removed. `Δ = without − control` at each monitor isolates the spikes' effect
+  from the refit variogram.
+
+`spike_points.csv` lists each spike point: `hour`, the point's sensor `site_id`s, `z`, the hour's
+median and MAD. `spikes.csv` holds one row per (affected hour, monitor): `obs`, `flagged`,
+`stored_error`, `control_error`, `without_error`, `delta`. The summary reports, over unflagged
+matchups, each affected hour's bias and RMSE with and without the spikes (stored error, and stored
+error + Δ); the RMSE of each affected day both ways; and the headline metrics with and without the
+affected hours.
+
+## Pooling within the hour
+
+`bias_vs_pooled` relates hourly bias to the hour's pooled share, but pooled share moves with the
+day's weather, so the two can be correlated without one causing the other. The matchup-level test
+holds the day fixed: OLS of `error` on `pooled_share_10km` with day fixed effects, and again with
+day and hour-of-day fixed effects, over the unflagged matchups with a non-null `pooled_share_10km`.
+`pooling.csv` gives each model's coefficient (µg/m³ per unit pooled fraction), its day-cluster
+bootstrap interval (resampling days, refitting), and `n`. The summary says pooling is supported as
+a driver of the bias only when the coefficient's interval excludes 0 in both models.
+
+## Per monitor
+
+`per_monitor.csv` gives, per monitor over its unflagged matchups, `n`, `bias`, `mae`, `rmse`,
+`pearson_r`, the four coverages, and, over all its matchups, the flagged share; with the count of
+calibration-target sensors and their median distance (from the availability report) and the mean
+`nearest_sensor_km`.
+
+## Variograms
+
+A kriged hour's variogram is `pure_nugget` when its partial sill `sill − nugget` is below 1% of
+`sill` (no spatial structure: the surface is the hour's weighted mean everywhere and the SD is flat
+at the nugget), `short_range` when it is exponential with `range_m` below 1000 m (structure finer
+than the grid), and `regular` otherwise. `variogram.csv` gives the count and share of each class,
+the count of each `variogram_model`, and the 5th, 25th, 50th, 75th, and 95th percentile of
+`range_m`; the metric table's `variogram` split scores each class.
+
+## Timing alignment
+
+An hour misaligned between the surface and AirNow would show as a better match at a lag.
+`lag.csv` pairs each matchup's `surface` with the same monitor's unflagged `obs` at `hour + lag`
+for lags −1, 0, and +1 h (from the AirNow observations the run reads, extended by an hour each
+side), giving `n`, `pearson_r`, and `rmse` per lag.
+
+## Flag rates
+
+The share of flagged AirNow readings is stated with both denominators, each named: flagged
+observations over all AirNow observations in kriged hours (the error budget's flag rate), and
+flagged matchups over all matchups. They differ because observations at monitors outside the grid
+or with no value form no matchup.
 
 ## Package Layout
 
@@ -466,7 +720,10 @@ src/aqdt/evaluation/
   report.py       # summary.md, run.json
   run.py          # evaluate: reads, per-hour scoring, maps, the report
   lomo.py         # leave one monitor out
-  baselines.py    # IDW and random-forest baselines
+  baselines.py    # hourly mean and median, IDW, and random-forest baselines; paired comparison
+  bootstrap.py    # day and hour block bootstraps, metric intervals
+  diagnostics.py  # conditional bias, coverage diagnostics, pooling, per monitor, variograms, lag
+  spikes.py       # spike rule and re-krige
 tests/evaluation/
 ```
 
@@ -490,7 +747,12 @@ never evaluate, so their environments do not install them.
 | Reference precision | Two published hourly bounds (T640, BAM-1020) | AirNow does not report the method per site; reporting both bounds shows how much the decomposition depends on it. |
 | Variogram uncertainty | Diagnostic magnitude from the alternative candidate | Model choice is the largest visible variogram effect per hour; adding it to the total would need a variogram posterior this design does not have. |
 | LOMO comparison | A re-kriged control with the full fits, beside the stored surface | The stored cell and a point prediction from a refitted variogram differ for reasons unrelated to calibration; only the control holds everything but the monitor's role fixed. |
-| Baselines | IDW (power 2) and a random forest on location, hour, and the hour's level | IDW is the simplest spatial interpolator and the forest a common learned one; both use only the sensor points, as kriging does, so the comparison is on equal inputs. |
+| Baselines | Hourly mean and median, IDW (power 2), and a random forest on location, hour, and the hour's level | The hourly mean and median are the zero-skill floor in space, IDW the simplest spatial interpolator, and the forest a common learned one; all use only the sensor points, as kriging does, so the comparison is on equal inputs. |
+| Intervals | Block bootstrap over UTC days, 1000 resamples, seeded | Matchups within a day share weather and calibration error; resampling days keeps that dependence, so intervals reflect the number of independent days rather than the number of matchups. |
+| Level-dependent bias | Judged on predicted level and a reliability slope, with the observed-level split beside them | Splitting by the observed value conditions on the monitor's noise and manufactures the pattern for any predictor; the predicted value does not contain that noise. |
+| Spike detection | A robust rule on each hour's points (median + 5 × 1.4826 × MAD, and above 20 µg/m³) | A rule applied to the data finds every such point, including ones not yet noticed; the robust scale ignores the spike itself, and the absolute floor keeps quiet hours from flagging ordinary scatter. |
+| Shared hourly offset | Diagnosed from same-hour calibration residuals, not added to the total | It is estimated against the monitors coverage is scored at, so adding it would fit the uncertainty to the test; reported beside the total, it shows how much of the shortfall it could explain. |
+| Pooling as a cause | Matchup-level regression on pooled share within 10 km, day fixed effects | Hourly pooled share moves with the day's weather; holding the day fixed separates the sensors' calibration route from what the day was like. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions
@@ -502,11 +764,9 @@ never evaluate, so their environments do not install them.
    sensors.
 3. A variogram-uncertainty term in the total (e.g. by bootstrap of the points), if variogram
    sensitivity proves comparable to the kriging variance.
-4. A shared hourly calibration-error term in the total. Total-variance coverage at the monitors
-   falls short of nominal even with the calibration term, and the largest candidate it omits is an
-   error common to many sensors in the same hour — humidity or aerosol composition the Barkjohn
-   correction does not capture — which neither `ρ₁` nor the pooled covariance carries. It could be
-   estimated from the cross-sensor correlation of same-hour calibration residuals.
+4. A shared hourly calibration-error term in the total, estimated without the scored monitors
+   (e.g. from monitors held out of the coverage check), if the coverage diagnostics show the
+   shared offset explains the shortfall.
 
 ## References
 

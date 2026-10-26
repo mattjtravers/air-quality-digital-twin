@@ -157,19 +157,23 @@ def test_baseline_table_scores_each_method_over_both_subsets():
             "surface": [5.0, 6.0, 7.0, 10.0],
             "idw": [4.0, 7.0, 8.0, 12.0],
             "rf": [6.0, 6.0, 6.0, 6.0],
+            "hour_mean": [7.0, 7.0, 7.0, 7.0],
+            "hour_median": [6.5, 6.5, 6.5, 6.5],
             "flagged": [False, False, False, True],
+            "hour": [HOUR] * 4,
         }
     )
-    table = baselines.baseline_table(m)
+    table = baselines.baseline_table(m, seed=0)
+    overall = table[table["split"] == "overall"]
     assert list(table.columns[:2]) == ["method", "subset"]
-    assert set(zip(table["method"], table["subset"])) == {
+    assert set(zip(overall["method"], overall["subset"])) == {
         (method, subset)
-        for method in ("kriging", "idw", "rf")
+        for method in ("kriging", "hour_mean", "hour_median", "idw", "rf")
         for subset in ("unflagged", "all")
     }
-    row = table.set_index(["method", "subset"]).loc[("idw", "unflagged")]
+    row = overall.set_index(["method", "subset"]).loc[("idw", "unflagged")]
     assert row["n"] == 3
     assert row["bias"] == pytest.approx(1 / 3)
     assert row["rmse"] == pytest.approx(np.sqrt(1 / 3))
-    kriging = table.set_index(["method", "subset"]).loc[("kriging", "all")]
+    kriging = overall.set_index(["method", "subset"]).loc[("kriging", "all")]
     assert kriging["mae"] == pytest.approx(0.5)

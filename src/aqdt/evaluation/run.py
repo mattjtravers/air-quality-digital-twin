@@ -18,11 +18,11 @@ from pyproj import Transformer
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.calibration.schemas import CalibrationSettings, hour_bound
-from aqdt.evaluation import baselines, budget, figures, lomo, report
+from aqdt.evaluation import baselines, budget, diagnostics, figures, lomo, report, spikes
 from aqdt.evaluation.calse import POOLED, rebuild_fits
 from aqdt.evaluation.decompose import REFERENCE_SD, detector_term, split_residual
 from aqdt.evaluation.matchups import cell_index
-from aqdt.evaluation.metrics import matchup_metrics, metric_table, pooled_bands
+from aqdt.evaluation.metrics import matchup_metrics, metric_table, pooled_bands, tertile_bands
 from aqdt.evaluation.montecarlo import propagate, select_mc_hours
 from aqdt.evaluation.schemas import EvaluationSettings, EvaluationSummary
 from aqdt.evaluation.sensitivity import variogram_sensitivity
@@ -41,12 +41,13 @@ from aqdt.maps.render import Panel, save_figure, small_multiples
 from aqdt.maps.settings import MapSettings
 from aqdt.maps.surface import SurfaceArrays, read_surface
 from aqdt.observation_store.archive import (
+    partition_objects,
     read_observations,
     read_partitioned,
     read_sites,
     resolve_archive_uri,
 )
-from aqdt.observation_store.products import render_partition_value
+from aqdt.observation_store.products import OBSERVATIONS, render_partition_value
 from aqdt.observation_store.schemas import SiteType, Source
 
 log = logging.getLogger(__name__)
@@ -70,14 +71,26 @@ MATCHUP_COLUMNS = [
     "n_sensors",
     "pooled_share",
     "fitted_share",
+    "pooled_share_10km",
+    "points_mean",
     "cal_variance",
     "total_variance",
     "total_sd",
     "z_total",
+    "cal_variance_raw",
+    "z_total_raw",
     "inputs_reproduced",
+    "hour_mean",
+    "hour_median",
     "idw",
     "rf",
+    "hour_mean_points_band",
+    "hour_mean_obs_band",
+    "spike_hour",
+    "spike_day",
+    "variogram",
 ]
+POOLED_RADIUS_M = 10_000
 
 
 @dataclass
@@ -130,6 +143,19 @@ def _nearest_km(points: HourPoints, x: float, y: float) -> float:
     return float(np.min(np.hypot(points.x - x, points.y - y)) / 1000)
 
 
+# @spec EVAL-MATCH-007
+def _pooled_near(sensors: pd.DataFrame, x: float, y: float) -> float:
+    """The pooled fraction of the kriging-input sensors within 10 km of ``(x, y)``."""
+    if not len(sensors):
+        return math.nan
+    near = np.hypot(
+        sensors["x"].to_numpy(dtype=float) - x, sensors["y"].to_numpy(dtype=float) - y
+    ) <= POOLED_RADIUS_M
+    if not near.any():
+        return math.nan
+    return float((sensors.loc[near, "fit_status"] == "pooled").mean())
+
+
 def _score_hour(
     fit, surface: SurfaceArrays, calibrated, sites, monitor_sites, observations, map_settings
 ) -> tuple[list[dict], _Hour, list[dict]]:
@@ -179,6 +205,8 @@ def _score_hour(
                 "n_sensors": len(sensors),
                 "pooled_share": pooled_share,
                 "fitted_share": fitted_share,
+                "pooled_share_10km": _pooled_near(sensors, o.x, o.y),
+                "points_mean": float(points.z.mean()) if points.n_points else math.nan,
                 "inputs_reproduced": reproduced,
             }
         )
@@ -207,8 +235,13 @@ def _fit_key(row) -> tuple[str, pd.Timestamp]:
     return (row.site_id, as_of) if row.fit_status == "fitted" else (POOLED, as_of)
 
 
-def _calibration_inputs(sensors: pd.DataFrame, rebuilt, stored_by_key):
-    """Per-sensor arrays for the calibration covariance, or ``None`` if any fit has none."""
+def _raw_matrix(cov) -> np.ndarray:
+    return np.array([[cov.var_a_raw, cov.cov_ab_raw], [cov.cov_ab_raw, cov.var_b_raw]])
+
+
+def _calibration_inputs(sensors: pd.DataFrame, rebuilt, stored_by_key, raw: bool = False):
+    """Per-sensor arrays for the calibration covariance, or ``None`` if any fit has none;
+    ``raw`` takes each fit's uncorrected covariance."""
     C, sigma2, keys, theta = [], [], [], []
     for row in sensors.itertuples(index=False):
         key = _fit_key(row)
@@ -216,7 +249,7 @@ def _calibration_inputs(sensors: pd.DataFrame, rebuilt, stored_by_key):
         if cov is None:
             return None
         stored = stored_by_key.get((row.site_id, pd.Timestamp(row.fit_as_of)))
-        C.append(cov.matrix())
+        C.append(_raw_matrix(cov) if raw else cov.matrix())
         sigma2.append(cov.sigma2)
         keys.append(key[1] if key[0] == POOLED else None)
         theta.append(
@@ -225,10 +258,10 @@ def _calibration_inputs(sensors: pd.DataFrame, rebuilt, stored_by_key):
     return np.array(C), np.array(sigma2), keys, np.array(theta)
 
 
-# @spec EVAL-TOTVAR-001, EVAL-TOTVAR-002, EVAL-TOTVAR-003
-def _cal_variance(context: _Hour, rebuilt, stored_by_key) -> np.ndarray:
+# @spec EVAL-TOTVAR-001, EVAL-TOTVAR-002, EVAL-TOTVAR-003, EVAL-UNC-001
+def _cal_variance(context: _Hour, rebuilt, stored_by_key, raw: bool = False) -> np.ndarray:
     n = len(context.monitors)
-    inputs = _calibration_inputs(context.sensors, rebuilt, stored_by_key)
+    inputs = _calibration_inputs(context.sensors, rebuilt, stored_by_key, raw)
     if n == 0 or inputs is None:
         return np.full(n, np.nan)
     C, sigma2, keys, _ = inputs
@@ -300,9 +333,10 @@ def _monte_carlo(contexts, matchups, rebuilt, stored_by_key, settings) -> pd.Dat
 
 
 # @spec EVAL-DECOMP-001, EVAL-DECOMP-002, EVAL-DECOMP-003
-# @spec EVAL-BASE-001, EVAL-BASE-002
+# @spec EVAL-BASE-001, EVAL-BASE-002, EVAL-BASE-004
 def _baselines(contexts, matchups, monitor_sites, settings) -> None:
-    """Fill the matchups' ``idw`` and ``rf`` columns from the hours' rebuilt kriging points."""
+    """Fill the matchups' ``hour_mean``, ``hour_median``, ``idw`` and ``rf`` columns from the
+    hours' rebuilt kriging points."""
     if not len(matchups):
         return
     points = pd.concat(
@@ -317,6 +351,9 @@ def _baselines(contexts, matchups, monitor_sites, settings) -> None:
     located = matchups[["hour", "site_id"]].merge(
         monitor_sites[["site_id", "x", "y"]], on="site_id", how="left"
     )
+    levels = {h: baselines.hour_level(p.z) for h, p in by_hour.items() if p.n_points}
+    matchups["hour_mean"] = [levels.get(h, (math.nan, math.nan))[0] for h in matchups["hour"]]
+    matchups["hour_median"] = [levels.get(h, (math.nan, math.nan))[1] for h in matchups["hour"]]
     matchups["idw"] = [
         baselines.idw(by_hour[h].x, by_hour[h].y, by_hour[h].z, x, y)
         for h, x, y in zip(located["hour"], located["x"], located["y"])
@@ -394,9 +431,18 @@ def _shares(a: float, b: float, sigma2: float) -> dict[str, float]:
     return {"share_a": share_a, "share_b": share_b, "share_c": max(0.0, 1.0 - share_a - share_b)}
 
 
+def _variogram_class(context) -> str:
+    fit = context.fit
+    return diagnostics.variogram_class(fit.variogram_model, fit.sill, fit.nugget, fit.range_m)
+
+
+# @spec EVAL-FIG-004
 def _select_map_hours(contexts, matchups) -> list[_Hour]:
-    """Four hours, one per quartile of the hour's mean monitor value, on distinct days when
-    possible; every kriged hour when there are four or fewer."""
+    """Four hours with a regular variogram (any kriged hour when none is), one per quartile of
+    the hour's mean monitor value, on distinct days when possible; every candidate hour when
+    there are four or fewer."""
+    regular = [c for c in contexts if _variogram_class(c) == "regular"]
+    contexts = regular or contexts
     with_means = [(c, matchups.loc[matchups["hour"] == c.hour, "obs"].mean()) for c in contexts]
     with_means = [(c, m) for c, m in with_means if np.isfinite(m)] or [(c, 0.0) for c in contexts]
     if len(with_means) <= 4:
@@ -427,7 +473,12 @@ def _maps(chosen: list[_Hour], matchups, map_settings, out: Path) -> dict[str, l
         resolution_m=first.transform.a,
     )
     clipping = {}
-    for kind, name in (("pm25", "maps_pm25"), ("sd", "maps_sd")):
+    scale_10 = MapSettings(pm25_max=10.0, sd_max=map_settings.sd_max)
+    for kind, name, scale in (
+        ("pm25", "maps_pm25", map_settings),
+        ("sd", "maps_sd", map_settings),
+        ("pm25", "maps_pm25_10", scale_10),
+    ):
         panels = []
         for c in chosen:
             surface = arrays[c.hour]
@@ -441,7 +492,7 @@ def _maps(chosen: list[_Hour], matchups, map_settings, out: Path) -> dict[str, l
                     monitors=(c.monitors["x"].to_numpy(float), c.monitors["y"].to_numpy(float)),
                 )
             )
-        fig, results = small_multiples(panels, grid, kind=kind, settings=map_settings)
+        fig, results = small_multiples(panels, grid, kind=kind, settings=scale)
         handles, labels = fig.axes[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="outside lower center", ncols=2, frameon=False)
         data = pd.DataFrame(
@@ -459,7 +510,7 @@ def _maps(chosen: list[_Hour], matchups, map_settings, out: Path) -> dict[str, l
         import matplotlib.pyplot as plt
 
         plt.close(fig)
-        clipping[kind] = results
+        clipping.setdefault(kind, results)
     return clipping
 
 
@@ -571,9 +622,59 @@ def _magnitudes(
     return out
 
 
+# @spec EVAL-SPLIT-003, EVAL-SPIKE-002
+def _label_hours(matchups: pd.DataFrame, contexts, affected: set) -> None:
+    """The matchups' hour-level split labels: tertile bands of the hour's point mean and of its
+    mean monitor obs, the spike hour and day, and the variogram class."""
+    if not len(matchups):
+        for column in ("hour_mean_points_band", "hour_mean_obs_band", "spike_hour", "spike_day",
+                       "variogram"):
+            matchups[column] = pd.Series(dtype=object)
+        return
+    point_means = pd.Series(
+        {c.hour: float(c.points.z.mean()) for c in contexts if c.points.n_points}
+    )
+    obs_means = matchups.groupby("hour")["obs"].mean()
+    point_bands = tertile_bands(point_means)
+    obs_bands = tertile_bands(obs_means)
+    matchups["hour_mean_points_band"] = matchups["hour"].map(point_bands).fillna("none")
+    matchups["hour_mean_obs_band"] = matchups["hour"].map(obs_bands).fillna("none")
+    affected_days = {pd.Timestamp(h).date() for h in affected}
+    matchups["spike_hour"] = np.where(matchups["hour"].isin(affected), "affected", "other")
+    matchups["spike_day"] = np.where(
+        pd.to_datetime(matchups["hour"], utc=True).dt.date.isin(affected_days), "affected", "other"
+    )
+    classes = {c.hour: _variogram_class(c) for c in contexts}
+    matchups["variogram"] = matchups["hour"].map(classes)
+
+
+# @spec EVAL-UNC-003
+def _shared_residuals(contexts, stored_by_key, observations: pd.DataFrame) -> pd.DataFrame:
+    """Per kriged hour, ``pm25_calibrated − obs`` for the hour's fitted kriging-input sensors
+    whose reference monitor has an unflagged reading at the hour."""
+    trusted = observations[
+        observations["qc_flags"].map(len).eq(0) & observations["pm25_raw"].notna()
+    ]
+    lookup = {
+        (s, pd.Timestamp(t)): float(v)
+        for s, t, v in zip(trusted["site_id"], trusted["observed_at"], trusted["pm25_raw"])
+    }
+    rows = []
+    for c in contexts:
+        fitted = c.sensors[c.sensors["fit_status"] == "fitted"]
+        for row in fitted.itertuples(index=False):
+            stored = stored_by_key.get((row.site_id, pd.Timestamp(row.fit_as_of)))
+            ref = getattr(stored, "ref_site_id", None) if stored is not None else None
+            obs = lookup.get((ref, c.hour)) if ref else None
+            if obs is not None:
+                rows.append({"hour": c.hour, "r": float(row.pm25_calibrated) - obs})
+    return pd.DataFrame(rows, columns=["hour", "r"])
+
+
 # @spec EVAL-IN-001, EVAL-IN-002, EVAL-IN-003, EVAL-MATCH-001, EVAL-MATCH-003, EVAL-MATCH-004
 # @spec EVAL-MATCH-005, EVAL-MATCH-006, EVAL-AVAIL-001, EVAL-AVAIL-002, EVAL-AVAIL-003
 # @spec EVAL-AVAIL-004, EVAL-FIG-001, EVAL-FIG-005, EVAL-RUN-001, EVAL-RUN-004, EVAL-BASE-003
+# @spec EVAL-IN-004, EVAL-SPIKE-003, EVAL-UNC-004
 def evaluate(
     archive_uri: str | None,
     start: datetime,
@@ -597,7 +698,11 @@ def evaluate(
     kriged = fits[fits["status"] == "kriged"]
     sites = read_sites(archive_uri)
     monitor_sites = _monitor_sites(sites)
-    observations = read_observations(archive_uri, Source.airnow, start, end)
+    # one hour each side for the timing lags; matchups use only the window's hours
+    observations = read_observations(archive_uri, Source.airnow, start - HOUR, end + HOUR)
+    in_window = observations[
+        (observations["observed_at"] >= start) & (observations["observed_at"] < end)
+    ]
     calibrated = read_partitioned(archive_uri, CALIBRATED_HOURLY, date=_date_filter(start, end))
 
     rows: list[dict] = []
@@ -626,21 +731,48 @@ def evaluate(
         (r.site_id, pd.Timestamp(r.as_of)): r for r in rebuilt.stored.itertuples(index=False)
     }
 
-    cal = {}
+    cal, cal_raw = {}, {}
     for c in contexts:
-        for site_id, value in zip(c.monitors["site_id"], _cal_variance(c, rebuilt, stored_by_key)):
+        corrected = _cal_variance(c, rebuilt, stored_by_key)
+        uncorrected = _cal_variance(c, rebuilt, stored_by_key, raw=True)
+        for site_id, value, raw in zip(c.monitors["site_id"], corrected, uncorrected):
             cal[(c.hour, site_id)] = value
+            cal_raw[(c.hour, site_id)] = raw
     if len(matchups):
-        matchups["cal_variance"] = [
-            cal[(h, s)] for h, s in zip(matchups["hour"], matchups["site_id"])
-        ]
+        keys = list(zip(matchups["hour"], matchups["site_id"]))
+        matchups["cal_variance"] = [cal[k] for k in keys]
         matchups["total_variance"] = matchups["variance"] + matchups["cal_variance"]
         matchups["total_sd"] = np.sqrt(matchups["total_variance"])
         matchups["z_total"] = np.where(
             matchups["total_sd"] > 0, matchups["error"] / matchups["total_sd"], np.nan
         )
+        matchups["cal_variance_raw"] = [cal_raw[k] for k in keys]
+        raw_sd = np.sqrt(matchups["variance"] + matchups["cal_variance_raw"])
+        matchups["z_total_raw"] = np.where(raw_sd > 0, matchups["error"] / raw_sd, np.nan)
     matchups["flagged"] = matchups["flagged"].astype(bool)
     matchups["inputs_reproduced"] = matchups["inputs_reproduced"].astype(bool)
+
+    min_points = FusionSettings().min_points
+    spike_tables, spike_rows, affected = [], [], set()
+    for c in contexts:
+        mask = spikes.spike_mask(c.points.z)
+        if not mask.any():
+            continue
+        affected.add(c.hour)
+        spike_tables.append(spikes.spike_points(c.hour, c.sensors, c.points))
+        scored = matchups[matchups["hour"] == c.hour]
+        spike_rows.append(spikes.rekrige(c.hour, c.points, mask, c.monitors, scored, min_points))
+    spike_points = (
+        pd.concat(spike_tables, ignore_index=True)
+        if spike_tables
+        else pd.DataFrame(columns=spikes.POINT_COLUMNS)
+    )
+    spike_table = (
+        pd.concat(spike_rows, ignore_index=True)
+        if spike_rows
+        else pd.DataFrame(columns=spikes.COLUMNS)
+    )
+    _label_hours(matchups, contexts, affected)
 
     shares = pd.Series(
         {
@@ -650,7 +782,7 @@ def evaluate(
         }
     )
     bands = pooled_bands(shares)
-    metrics = metric_table(matchups, bands)
+    metrics = metric_table(matchups, bands, settings.seed)
     unflagged = matchups[~matchups["flagged"]]
     headline = matchup_metrics(unflagged)
     all_metrics = matchup_metrics(matchups)
@@ -680,9 +812,14 @@ def evaluate(
     mc = _monte_carlo(contexts, matchups, rebuilt, stored_by_key, settings)
     _baselines(contexts, matchups, monitor_sites, settings)
     baseline_table = (
-        baselines.baseline_table(matchups)
+        baselines.baseline_table(matchups, settings.seed)
         if len(matchups)
         else pd.DataFrame(columns=baselines.COLUMNS)
+    )
+    paired = (
+        baselines.paired_table(matchups, settings.seed)
+        if len(matchups)
+        else pd.DataFrame(columns=baselines.PAIRED_COLUMNS)
     )
     lomo_table = (
         lomo.leave_one_monitor_out(
@@ -692,13 +829,14 @@ def evaluate(
             calibrated,
             sites,
             calibration_settings,
-            FusionSettings().min_points,
+            min_points,
             settings,
         )
         if len(matchups)
         else pd.DataFrame(columns=lomo.COLUMNS)
     )
-    lomo_stats = lomo.lomo_statistics(lomo_table)
+    lomo_stats = lomo.lomo_statistics(lomo_table, settings.seed)
+    lomo_monitors = lomo.lomo_by_monitor(lomo_table)
     decomposition = _decomposition(rebuilt, stored_by_key)
 
     def inside(x: float, y: float):
@@ -724,11 +862,45 @@ def evaluate(
         rebuilt.stored,
         observations[observations["observed_at"].isin(kriged["hour"])]
         if len(kriged)
-        else observations,
+        else in_window,
         availability,
         lomo_stats,
     )
     error_budget = budget.error_budget(magnitudes)
+
+    unflagged_rows = matchups[~matchups["flagged"]]
+    scored = len(unflagged_rows) > 0
+    shared = diagnostics.shared_offset(_shared_residuals(contexts, stored_by_key, observations))
+    coverage_diag = (
+        diagnostics.coverage_diagnostics(unflagged_rows, settings.seed, shared[0])
+        if scored
+        else pd.DataFrame(columns=diagnostics.COVERAGE_COLUMNS)
+    )
+    reliability = (
+        diagnostics.reliability(unflagged_rows, settings.seed)
+        if scored
+        else pd.DataFrame(columns=diagnostics.RELIABILITY_COLUMNS)
+    )
+    conditional = (
+        diagnostics.slopes(unflagged_rows, settings.seed)
+        if scored
+        else pd.DataFrame(columns=diagnostics.SLOPE_COLUMNS)
+    )
+    pooling = (
+        diagnostics.pooling_regression(matchups, settings.seed)
+        if scored
+        else pd.DataFrame(columns=diagnostics.POOLING_COLUMNS)
+    )
+    per_monitor = diagnostics.per_monitor(matchups, availability)
+    variogram = diagnostics.variogram_table(kriged)
+    lag = diagnostics.lag_table(matchups, observations)
+    flag_rates = diagnostics.flag_rates(
+        matchups,
+        observations[observations["observed_at"].isin(kriged["hour"])]
+        if len(kriged)
+        else in_window,
+    )
+    spike_summary = spikes.spike_summary(matchups, spike_table, spike_points, affected)
 
     matchups.to_csv(out / "matchups.csv", index=False)
     metrics.to_csv(out / "metrics.csv", index=False)
@@ -736,12 +908,24 @@ def evaluate(
     rebuilt.table.to_csv(out / "fit_uncertainty.csv", index=False)
     mc.to_csv(out / "montecarlo.csv", index=False)
     lomo_table.to_csv(out / "lomo.csv", index=False)
+    lomo_monitors.to_csv(out / "lomo_by_monitor.csv", index=False)
     baseline_table.to_csv(out / "baselines.csv", index=False)
+    paired.to_csv(out / "baseline_paired.csv", index=False)
     decomposition.to_csv(out / "decomposition.csv", index=False)
     sensitivity.to_csv(out / "variogram_sensitivity.csv", index=False)
+    variogram.to_csv(out / "variogram.csv", index=False)
+    coverage_diag.to_csv(out / "coverage_diagnostics.csv", index=False)
+    reliability.to_csv(out / "reliability.csv", index=False)
+    conditional.to_csv(out / "conditional_bias.csv", index=False)
+    spike_points.to_csv(out / "spike_points.csv", index=False)
+    spike_table.to_csv(out / "spikes.csv", index=False)
+    pooling.to_csv(out / "pooling.csv", index=False)
+    per_monitor.to_csv(out / "per_monitor.csv", index=False)
+    lag.to_csv(out / "lag.csv", index=False)
     error_budget.to_csv(out / "error_budget.csv", index=False)
 
     figures.error_budget(error_budget, out)
+    written = ["error_budget"]
     clipping = {}
     if len(matchups):
         figures.timeseries(matchups, out)
@@ -749,9 +933,23 @@ def evaluate(
         figures.coverage(headline, out)
         figures.bias_vs_pooled(matchups, out)
         figures.decomposition(decomposition, out)
+        written += ["timeseries", "scatter", "coverage", "bias_vs_pooled", "decomposition"]
         if len(mc):
             figures.mc_vs_analytic(mc, out)
+            written.append("mc_vs_analytic")
+        if len(lomo_table):
+            figures.lomo_rmse(lomo_table, out)
+            written.append("lomo_rmse")
+        figures.baselines_rmse(baseline_table, out)
+        written.append("baselines_rmse")
+        if len(reliability):
+            figures.reliability(reliability, out)
+            written.append("reliability")
+        figures.qq_ztotal(unflagged_rows["z_total"].to_numpy(dtype=float), out)
+        written.append("qq_ztotal")
         clipping = _maps(_select_map_hours(contexts, matchups), matchups, map_settings, out)
+        written += ["maps_pm25", "maps_sd", "maps_pm25_10"]
+    figures.write_captions(out, written)
 
     expected = pd.date_range(start, end, freq="h", inclusive="left")
     present = set(fits["hour"])
@@ -775,6 +973,26 @@ def evaluate(
         "lomo": lomo_stats,
         "lomo_hours": lomo_table["hour"].nunique() if len(lomo_table) else 0,
         "baselines": baseline_table,
+        "paired": paired,
+        "lomo_by_monitor": lomo_monitors,
+        "coverage_diagnostics": coverage_diag,
+        "shared": shared,
+        "conditional": conditional,
+        "reliability": reliability,
+        "spike_points": spike_points,
+        "spike_summary": spike_summary,
+        "pooling": pooling,
+        "variogram": variogram,
+        "lag": lag,
+        "flag_rates": flag_rates,
+        "per_monitor": per_monitor,
+        "matchups_sha256": report.file_sha256(out / "matchups.csv"),
+        "airnow_objects": partition_objects(
+            archive_uri,
+            OBSERVATIONS,
+            source=Source.airnow.value,
+            date=_date_filter(start - HOUR, end + HOUR),
+        ),
         "decomposition": decomposition,
         "sensitivity": sensitivity,
         "fit_table": rebuilt.table,

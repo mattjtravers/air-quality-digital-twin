@@ -29,6 +29,40 @@ AXIS_LABELS = {
         "Analytic calibration variance ((µg/m³)²)",
         "Monte Carlo calibration variance ((µg/m³)²)",
     ],
+    "lomo_rmse": ["RMSE at the monitor (µg/m³)"],
+    "baselines_rmse": ["RMSE (µg/m³)", "Bias (µg/m³)"],
+    "reliability": ["Surface PM2.5, decile mean (µg/m³)", "AirNow PM2.5, decile mean (µg/m³)"],
+    "qq_ztotal": ["Standard-normal quantile (SD)", "z_total quantile (SD)"],
+}
+# Numbered in this order in figures.md (EVAL-FIG-007).
+CAPTIONS = {
+    "timeseries": "Hourly bias and RMSE of the surface at the monitors (unflagged, µg/m³), "
+    "coloured by date, with the interquartile range of the hour's errors.",
+    "scatter": "Surface against AirNow PM2.5 at every unflagged matchup (µg/m³), with the 1:1 "
+    "line and R² (skill).",
+    "coverage": "Share of unflagged matchups within ±1 and ±2 SD with the kriging SD and the "
+    "total SD (%), against the Gaussian nominal.",
+    "bias_vs_pooled": "Hourly bias (unflagged, µg/m³) against the hour's pooled share of "
+    "kriging inputs (%), with a least-squares line.",
+    "decomposition": "Shares of the calibration residual variance from detector noise, "
+    "reference error, and the remainder (%), by fit status and reference bound.",
+    "mc_vs_analytic": "Monte Carlo against analytic calibration variance at the sampled "
+    "matchups ((µg/m³)²), with the 1:1 line.",
+    "error_budget": "The error budget: every known error source, where it enters, its type, "
+    "how it is handled, and its magnitude.",
+    "lomo_rmse": "RMSE at each monitor of the stored surface, the control re-krige, and the "
+    "re-krige without the monitor in calibration (unflagged LOMO rows, µg/m³).",
+    "baselines_rmse": "RMSE and bias of kriging and each baseline over the unflagged matchups "
+    "(µg/m³), with 95% day-bootstrap intervals.",
+    "reliability": "Mean AirNow PM2.5 per decile of the surface (unflagged, µg/m³) with 95% "
+    "day-bootstrap intervals and bin counts, against the 1:1 line.",
+    "qq_ztotal": "Quantiles of z_total (unflagged, SD units) against standard-normal "
+    "quantiles, with the 1:1 line.",
+    "maps_pm25": "Surface PM2.5 at four hours with regular variograms (µg/m³), on one fixed "
+    "scale, sensors and monitors overlaid.",
+    "maps_sd": "Surface standard deviation at the same four hours (µg/m³), on one fixed scale.",
+    "maps_pm25_10": "Surface PM2.5 at the same four hours on a 0–10 µg/m³ scale, so clean-air "
+    "hours use more of the colour range.",
 }
 plt.rcParams.update(
     {
@@ -235,3 +269,105 @@ def error_budget(table: pd.DataFrame, out: Path) -> None:
         if row == 0:
             cell.set_text_props(weight="bold")
     _write(fig, table, out, "error_budget")
+
+
+# @spec EVAL-FIG-006
+def lomo_rmse(table: pd.DataFrame, out: Path) -> None:
+    """Per monitor: RMSE of the stored, control, and without-monitor errors (unflagged rows)."""
+    rows = table[~table["flagged"].astype(bool)]
+    data = (
+        rows.groupby("site_id")[["stored_error", "control_error", "lomo_error"]]
+        .agg(lambda e: float(np.sqrt((e.dropna() ** 2).mean())) if e.notna().any() else np.nan)
+        .reset_index()
+    )
+    fig, ax = plt.subplots(figsize=(FULL_IN, 2.8), layout="constrained")
+    y = np.arange(len(data))
+    for k, (column, label, colour) in enumerate(
+        (
+            ("stored_error", "Stored surface", "#5ec962"),
+            ("control_error", "Control re-krige", "#21918c"),
+            ("lomo_error", "Without the monitor", "#3b528b"),
+        )
+    ):
+        ax.barh(y + (k - 1) * 0.27, data[column], 0.26, label=label, color=colour)
+    ax.set_yticks(y, [s.split(":")[-1] for s in data["site_id"]])
+    ax.invert_yaxis()
+    ax.set_xlabel(AXIS_LABELS["lomo_rmse"][0])
+    ax.legend(loc="lower right", frameon=False)
+    _write(fig, data, out, "lomo_rmse")
+
+
+# @spec EVAL-FIG-006
+def baselines_rmse(table: pd.DataFrame, out: Path) -> None:
+    """RMSE and bias of each method, unflagged and overall, with day-bootstrap intervals."""
+    data = table[(table["subset"] == "unflagged") & (table["split"] == "overall")].reset_index(
+        drop=True
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(FULL_IN, 2.6), layout="constrained")
+    x = np.arange(len(data))
+    labels = AXIS_LABELS["baselines_rmse"]
+    for ax, metric, label in zip(axes, ("rmse", "bias"), labels, strict=True):
+        value = data[metric].to_numpy(dtype=float)
+        lo = value - data[f"{metric}_ci_low"].to_numpy(dtype=float)
+        hi = data[f"{metric}_ci_high"].to_numpy(dtype=float) - value
+        errors = np.vstack([np.nan_to_num(lo), np.nan_to_num(hi)])
+        ax.bar(x, value, 0.6, yerr=errors, capsize=2, color="#3b528b")
+        ax.set_xticks(x, [m.replace("_", " ") for m in data["method"]], rotation=30, ha="right")
+        ax.set_ylabel(label)
+        ax.axhline(0, color="0.3", lw=0.6)
+    _write(fig, data, out, "baselines_rmse")
+
+
+# @spec EVAL-FIG-006
+def reliability(table: pd.DataFrame, out: Path) -> None:
+    """Mean obs per surface decile with intervals, the 1:1 line, and each bin's count."""
+    fig, ax = plt.subplots(figsize=(COLUMN_IN, COLUMN_IN), layout="constrained")
+    x = table["surface_mean"].to_numpy(dtype=float)
+    y = table["obs_mean"].to_numpy(dtype=float)
+    lo = np.nan_to_num(y - table["obs_ci_low"].to_numpy(dtype=float))
+    hi = np.nan_to_num(table["obs_ci_high"].to_numpy(dtype=float) - y)
+    ax.errorbar(x, y, yerr=np.vstack([lo, hi]), fmt="o", ms=3, capsize=2, color="#3b528b")
+    top = float(np.nanmax(np.concatenate([x, y + hi]))) * 1.08 if len(x) else 1.0
+    ax.plot([0, top], [0, top], color="0.3", lw=0.8, ls="--", label="1:1")
+    for xi, yi, n in zip(x, y, table["n"], strict=True):
+        ax.annotate(f"{int(n)}", (xi, yi), textcoords="offset points", xytext=(3, -8), fontsize=5)
+    ax.set_xlim(0, top)
+    ax.set_ylim(0, top)
+    ax.set_aspect(1.0)
+    ax.set_xlabel(AXIS_LABELS["reliability"][0])
+    ax.set_ylabel(AXIS_LABELS["reliability"][1])
+    ax.legend(loc="upper left", frameon=False)
+    _write(fig, table, out, "reliability")
+
+
+# @spec EVAL-FIG-006
+def qq_ztotal(z, out: Path) -> None:
+    """Sorted z_total against standard-normal quantiles, with the 1:1 line."""
+    from statistics import NormalDist
+
+    values = np.sort(np.asarray(z, dtype=float)[np.isfinite(z)])
+    probabilities = (np.arange(1, len(values) + 1) - 0.5) / max(len(values), 1)
+    theory = np.array([NormalDist().inv_cdf(p) for p in probabilities])
+    data = pd.DataFrame({"normal_quantile": theory, "z_total": values})
+    fig, ax = plt.subplots(figsize=(COLUMN_IN, COLUMN_IN), layout="constrained")
+    ax.plot(theory, values, ".", ms=2, color="#3b528b")
+    edge = float(np.nanmax(np.abs(np.concatenate([theory, values])))) if len(values) else 3.0
+    ax.plot([-edge, edge], [-edge, edge], color="0.3", lw=0.8, ls="--", label="1:1")
+    ax.set_xlabel(AXIS_LABELS["qq_ztotal"][0])
+    ax.set_ylabel(AXIS_LABELS["qq_ztotal"][1])
+    ax.legend(loc="upper left", frameon=False)
+    _write(fig, data, out, "qq_ztotal")
+
+
+# @spec EVAL-FIG-007
+def write_captions(out: Path, written: list[str]) -> None:
+    """``figures.md``: every figure written, numbered in the report's order, with a caption."""
+    lines = ["# Figures", ""]
+    number = 0
+    for name, caption in CAPTIONS.items():
+        if name not in written:
+            continue
+        number += 1
+        lines.append(f"**Figure {number}.** `{name}.png` — {caption}")
+        lines.append("")
+    (out / "figures.md").write_text("\n".join(lines))

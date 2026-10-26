@@ -3,6 +3,7 @@
 ``write_partitioned`` / ``read_partitioned`` are the two primitives every product uses; the
 observation and site functions are thin wrappers over them with their ``Product`` definitions.
 ``replace_object`` gives a whole object, such as a raster, the same write guarantees.
+``partition_objects`` lists the objects a read would read, without reading them.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ import logging
 import os
 import uuid
 from collections.abc import Callable, Iterable, Iterator
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import fsspec
@@ -355,15 +357,10 @@ def _matches(value: str, condition: Filter) -> bool:
     return value == render_partition_value(condition)
 
 
-# @spec OBS-ARCHIVE-015, OBS-ARCHIVE-019
-def read_partitioned(archive_uri: str | None, product: Product, **filters: Filter) -> pd.DataFrame:
-    """Read every partition whose rendered keys satisfy the filters into one validated frame.
-
-    A filter is a literal (equality against the rendered key) or a predicate on the rendered key.
-    No matching partition is not an error: an empty typed frame is returned and the request logged.
-    """
-    archive_uri = resolve_archive_uri(archive_uri)
-    fs, root = _filesystem(archive_uri)
+def _matching_paths(
+    fs: fsspec.AbstractFileSystem, root: str, product: Product, filters: dict[str, Filter]
+) -> list[str]:
+    """The partition objects of ``product`` whose rendered keys satisfy ``filters``, sorted."""
     base = _join(root, product.prefix)
     key_names = list(product.partition_keys)
     paths: list[str] = []
@@ -382,6 +379,19 @@ def read_partitioned(archive_uri: str | None, product: Product, **filters: Filte
             else:
                 if all(_matches(keys[name], condition) for name, condition in filters.items()):
                     paths.append(path)
+    return paths
+
+
+# @spec OBS-ARCHIVE-015, OBS-ARCHIVE-019
+def read_partitioned(archive_uri: str | None, product: Product, **filters: Filter) -> pd.DataFrame:
+    """Read every partition whose rendered keys satisfy the filters into one validated frame.
+
+    A filter is a literal (equality against the rendered key) or a predicate on the rendered key.
+    No matching partition is not an error: an empty typed frame is returned and the request logged.
+    """
+    archive_uri = resolve_archive_uri(archive_uri)
+    fs, root = _filesystem(archive_uri)
+    paths = _matching_paths(fs, root, product, filters)
     if not paths:
         log.info(
             "no partition matched: archive=%s product=%s filters=%s",
@@ -395,6 +405,47 @@ def read_partitioned(archive_uri: str | None, product: Product, **filters: Filte
     if product.has_geometry:
         combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=frames[0].crs)
     return product.frame_model.validate(combined)
+
+
+@dataclass(frozen=True)
+class ObjectInfo:
+    """One archive object as its filesystem lists it; ``etag`` and ``last_modified`` are None
+    where the filesystem does not report them (a local directory)."""
+
+    key: str
+    size: int
+    etag: str | None
+    last_modified: datetime | None
+
+
+def _last_modified(info: dict) -> datetime | None:
+    value = info.get("LastModified")
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+# @spec OBS-ARCHIVE-031
+def partition_objects(
+    archive_uri: str | None, product: Product, **filters: Filter
+) -> list[ObjectInfo]:
+    """The partition objects ``read_partitioned`` would read for the same filters, listed without
+    reading them, sorted by key (relative to the archive root)."""
+    archive_uri = resolve_archive_uri(archive_uri)
+    fs, root = _filesystem(archive_uri)
+    out = []
+    for path in _matching_paths(fs, root, product, filters):
+        info = fs.info(path)
+        etag = info.get("ETag")
+        out.append(
+            ObjectInfo(
+                key=path[len(root) :].strip("/"),
+                size=int(info["size"]),
+                etag=str(etag) if etag else None,
+                last_modified=_last_modified(info),
+            )
+        )
+    return sorted(out, key=lambda o: o.key)
 
 
 # --- guarded whole objects -------------------------------------------------------------------
