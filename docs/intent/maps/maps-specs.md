@@ -13,20 +13,21 @@ surface raster), `SAVE` (figure conventions), `CFG` (settings and tests).
 
 - [x] **MAP-RENDER-001**: Maps shall expose `render_surface(ax, array, grid, *, kind, sensors=None, monitors=None, settings=None) -> RenderResult`, which draws a `(height, width)` array on fusion's grid into `ax` with extent `[x_min, x_min + width·res, y_max − height·res, y_max]` converted to kilometres, row 0 at the top, nearest-cell sampling, and NaN cells transparent.
 - [x] **MAP-RENDER-002**: When rendering, maps shall label the x axis `Easting (km, EPSG:26918)` and the y axis `Northing (km)` and set an equal aspect ratio.
-- [x] **MAP-RENDER-003**: `RenderResult` shall carry the image's mappable, whether any finite cell exceeds the kind's upper limit, the fraction of finite cells that do, and the array's finite maximum.
+- [x] **MAP-RENDER-003**: `RenderResult` shall carry the image's mappable, whether any finite cell lies outside the kind's limits (above its upper limit, or below its lower limit), the fraction of finite cells that do, and the array's finite maximum.
 
 ## Scales
 
 - [x] **MAP-SCALE-001**: When `kind` is `pm25`, maps shall draw with the `viridis` colormap and continuous normalisation from 0 to `settings.pm25_max`.
 - [x] **MAP-SCALE-002**: When `kind` is `sd`, maps shall draw with the `magma` colormap and continuous normalisation from 0 to `settings.sd_max`.
 - [x] **MAP-SCALE-003**: Maps shall use the same limits for every array of a kind, whatever the array's own range.
-- [x] **MAP-SCALE-004**: Maps shall expose `colorize(array, *, kind, settings=None)` returning a `(height, width, 4)` `uint8` RGBA array coloured with the kind's colormap and limits (MAP-SCALE-001, MAP-SCALE-002): values at or below 0 in the bottom colour, values above the upper limit in the top colour, finite cells with alpha 255, and NaN cells with alpha 0.
-- [x] **MAP-SCALE-005**: Maps shall expose `colour_stops(kind, n=11, settings=None)` returning `n` `#rrggbb` strings, the kind's colormap sampled at `n` evenly spaced values from 0 to its upper limit inclusive, matching the colours `colorize` gives those values. Maps shall also expose `scale(kind, settings=None)` returning the kind's colormap name, upper limit, and colorbar label.
+- [x] **MAP-SCALE-004**: Maps shall expose `colorize(array, *, kind, settings=None)` returning a `(height, width, 4)` `uint8` RGBA array coloured with the kind's colormap and limits (MAP-SCALE-001, MAP-SCALE-002, MAP-SCALE-006): values at or below the lower limit in the bottom colour, values above the upper limit in the top colour, finite cells with alpha 255, and NaN cells with alpha 0.
+- [x] **MAP-SCALE-005**: Maps shall expose `colour_stops(kind, n=11, settings=None)` returning `n` `#rrggbb` strings, the kind's colormap sampled at `n` evenly spaced values from its lower limit to its upper limit inclusive, matching the colours `colorize` gives those values. Maps shall also expose `scale(kind, settings=None)` returning the kind's colormap name, lower limit, upper limit, and colorbar label.
+- [x] **MAP-SCALE-006**: When `kind` is `diff`, maps shall draw with the `RdBu_r` colormap and continuous normalisation from `−settings.diff_max` to `+settings.diff_max`, with the colorbar label `Above / below this hour's average (µg/m³)`.
 
 ## Clipping and Colorbars
 
-- [x] **MAP-CLIP-001**: Maps shall expose `add_colorbar(fig, mappable, axes, *, kind, clipped)`, labelling the bar `PM2.5 (µg/m³)` for `pm25` and `Standard deviation (µg/m³)` for `sd`, and drawing it with an arrow at the upper end (`extend="max"`) if and only if `clipped` is true.
-- [x] **MAP-CLIP-002**: When a cell's value exceeds the upper limit, maps shall draw it in the colormap's top colour.
+- [x] **MAP-CLIP-001**: Maps shall expose `add_colorbar(fig, mappable, axes, *, kind, clipped)`, labelling the bar with the kind's colorbar label, and drawing it with arrows if and only if `clipped` is true: at the upper end (`extend="max"`) for `pm25` and `sd`, at both ends (`extend="both"`) for `diff`.
+- [x] **MAP-CLIP-002**: When a cell's value exceeds the upper limit, maps shall draw it in the colormap's top colour; when it is below the lower limit, in the colormap's bottom colour.
 
 ## Markers
 
@@ -48,6 +49,6 @@ surface raster), `SAVE` (figure conventions), `CFG` (settings and tests).
 
 ## Settings and Tests
 
-- [x] **MAP-CFG-001**: Maps shall define the constants `PM25_MAX = 12.0` and `SD_MAX = 3.0` and `MapSettings` (Pydantic settings) with `pm25_max` (`AQDT_MAP_PM25_MAX`, default `PM25_MAX`) and `sd_max` (`AQDT_MAP_SD_MAX`, default `SD_MAX`), each optional.
-- [x] **MAP-CFG-002**: If `pm25_max` or `sd_max` is not positive, then maps shall fail with a validation error naming the setting.
+- [x] **MAP-CFG-001**: Maps shall define the constants `PM25_MAX = 10.0`, `DIFF_MAX = 3.0`, and `SD_MAX = 3.0` and `MapSettings` (Pydantic settings) with `pm25_max` (`AQDT_MAP_PM25_MAX`, default `PM25_MAX`), `diff_max` (`AQDT_MAP_DIFF_MAX`, default `DIFF_MAX`), and `sd_max` (`AQDT_MAP_SD_MAX`, default `SD_MAX`), each optional.
+- [x] **MAP-CFG-002**: If `pm25_max`, `diff_max`, or `sd_max` is not positive, then maps shall fail with a validation error naming the setting.
 - [x] **MAP-CFG-003**: Maps tests shall render with matplotlib's non-interactive `Agg` backend and require neither a display nor a network connection.

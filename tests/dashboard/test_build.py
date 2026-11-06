@@ -19,7 +19,7 @@ from rasterio.warp import Resampling, calculate_default_transform, reproject
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.fusion.products import SURFACE_FITS
 from aqdt.maps.render import colorize, colour_stops
-from aqdt.maps.settings import PM25_MAX, SD_MAX
+from aqdt.maps.settings import DIFF_MAX, PM25_MAX, SD_MAX
 from aqdt.maps.surface import read_surface
 from aqdt.observation_store.archive import read_partitioned, read_sites
 
@@ -32,6 +32,7 @@ HOUR_KEYS = {
     "hour",
     "status",
     "pm25_png",
+    "diff_png",
     "sd_png",
     "bounds_latlon",
     "surface_min",
@@ -40,11 +41,13 @@ HOUR_KEYS = {
     "sd_max",
     "n_sensors",
     "variogram_model",
+    "nugget_share",
     "monitors",
     "sensors",
 }
 SURFACE_FIELDS = (
     "pm25_png",
+    "diff_png",
     "sd_png",
     "bounds_latlon",
     "surface_min",
@@ -52,6 +55,7 @@ SURFACE_FIELDS = (
     "surface_max",
     "sd_max",
     "variogram_model",
+    "nugget_share",
 )
 
 
@@ -193,8 +197,8 @@ def test_every_hour_has_one_status_and_gaps_carry_no_surface(site):
         for name in SURFACE_FIELDS:
             assert entry[name] is None, (hour, name)
         stamp = hour.strftime("%Y-%m-%dT%H")
-        assert not (out / "data" / "frames" / f"pm25_{stamp}.png").exists()
-        assert not (out / "data" / "frames" / f"sd_{stamp}.png").exists()
+        for kind in ("pm25", "diff", "sd"):
+            assert not (out / "data" / "frames" / f"{kind}_{stamp}.png").exists()
 
 
 # @spec DASH-GAP-001, DASH-GAP-002
@@ -230,8 +234,10 @@ def test_frames_are_the_reprojected_surface_on_maps_scales(site, archive):
     hours = hours_by_time(manifest_of(out))
     surface = read_surface(fits_by_hour(archive)[iso(H11)].surface_uri)
     pm25, _ = to_3857(surface.pm25, surface.transform)
+    mean = surface.pm25[np.isfinite(surface.pm25)].mean()
+    diff, _ = to_3857(surface.pm25 - mean, surface.transform)
     sd, _ = to_3857(np.sqrt(np.clip(surface.variance, 0, None)), surface.transform)
-    for kind, array in (("pm25", pm25), ("sd", sd)):
+    for kind, array in (("pm25", pm25), ("diff", diff), ("sd", sd)):
         image = np.asarray(Image.open(out / hours[iso(H11)][f"{kind}_png"]).convert("RGBA"))
         assert image.shape == (*array.shape, 4), kind
         np.testing.assert_array_equal(image, colorize(array, kind=kind), err_msg=kind)
@@ -245,11 +251,11 @@ def test_frames_are_bare_pngs_named_for_the_hour(site):
     frames = sorted((out / "data" / "frames").iterdir())
     expected = sorted(
         f"{kind}_{hour.strftime('%Y-%m-%dT%H')}.png"
-        for kind in ("pm25", "sd")
+        for kind in ("pm25", "diff", "sd")
         for hour in (H10, H11, H12)
     )
     assert [p.name for p in frames] == expected
-    assert summary.frames == 6
+    assert summary.frames == 9
     for path in frames:
         chunks = png_chunks(path)
         assert set(chunks) <= {b"IHDR", b"IDAT", b"IEND"}, (path.name, chunks)
@@ -294,6 +300,20 @@ def test_frame_statistics_come_from_the_source_grid(site, archive):
         assert entry["sd_max"] == round(float(sd.max()), 2)
 
 
+# @spec DASH-FRAME-006
+def test_nugget_share_is_nugget_over_sill(site, archive):
+    out, _ = site
+    hours = hours_by_time(manifest_of(out))
+    fits = fits_by_hour(archive)
+    for hour in (H10, H11, H12):
+        fit = fits[iso(hour)]
+        assert hours[iso(hour)]["nugget_share"] == round(fit.nugget / fit.sill, 2)
+    from aqdt.dashboard.build import nugget_share
+
+    assert nugget_share(0.2, 0.0) is None and nugget_share(None, 1.0) is None
+    assert nugget_share(0.25, 1.0) == 0.25
+
+
 # --- Manifest ---------------------------------------------------------------------------------
 
 
@@ -334,7 +354,7 @@ def test_hours_are_contiguous_and_carry_their_fit(site, archive):
         assert entry["n_sensors"] == (None if fit is None else int(fit.n_sensors))
         if entry["status"] == "kriged":
             assert entry["variogram_model"] == fit.variogram_model
-            for kind in ("pm25", "sd"):
+            for kind in ("pm25", "diff", "sd"):
                 path = entry[f"{kind}_png"]
                 assert not path.startswith("/") and (out / path).is_file()
 
@@ -343,14 +363,25 @@ def test_hours_are_contiguous_and_carry_their_fit(site, archive):
 def test_scales_come_from_maps(site):
     out, _ = site
     scales = manifest_of(out)["scales"]
+    assert set(scales) == {"pm25", "diff", "sd"}
     assert scales["pm25"] == {
+        "min": 0.0,
         "max": PM25_MAX,
         "cmap": "viridis",
         "units": "µg/m³",
         "label": "PM2.5 (µg/m³)",
         "stops": colour_stops("pm25", 11),
     }
+    assert scales["diff"] == {
+        "min": -DIFF_MAX,
+        "max": DIFF_MAX,
+        "cmap": "RdBu_r",
+        "units": "µg/m³",
+        "label": "Above / below this hour's average (µg/m³)",
+        "stops": colour_stops("diff", 11),
+    }
     assert scales["sd"] == {
+        "min": 0.0,
         "max": SD_MAX,
         "cmap": "magma",
         "units": "µg/m³",
@@ -501,7 +532,7 @@ def test_build_summary(site):
     assert summary.window_start == H10 and summary.window_end == H14 + H
     assert summary.latest_hour == H12
     assert summary.hours == {"kriged": 3, "insufficient_points": 1, "missing": 1}
-    assert summary.frames == 6
+    assert summary.frames == 9
     assert summary.site_bytes == sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     assert summary.elapsed_s >= 0
 

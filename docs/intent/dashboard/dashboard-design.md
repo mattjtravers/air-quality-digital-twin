@@ -83,8 +83,17 @@ because one unreadable raster should cost one frame, not the whole page.
 
 ### Frames
 
-For each `kriged` hour, two frames are rendered: the estimate (band 1, µg/m³) and the standard
-deviation (the square root of band 2, clamped at 0 first, µg/m³).
+For each `kriged` hour, three frames are rendered:
+
+- the **estimate** (band 1, µg/m³);
+- the **difference from the hour's average**: band 1 minus the mean of band 1's finite cells, the
+  same mean as `surface_mean` before rounding (µg/m³);
+- the **standard deviation**: the square root of band 2, clamped at 0 first (µg/m³).
+
+A clean hour can span only a couple of µg/m³ across the metro, which on the estimate's fixed
+0–`pm25_max` scale is a few neighbouring colours and reads as flat. The difference view keeps
+that hour's spatial pattern visible on a scale centred on zero, while the estimate keeps every
+hour comparable in absolute terms.
 
 1. **Reproject** each array from the grid's EPSG:26918 to EPSG:3857 (Web Mercator, the basemap's
    CRS) with `rasterio.warp.reproject`. Nearest-neighbour resampling keeps each cell's own value,
@@ -92,13 +101,14 @@ deviation (the square root of band 2, clamped at 0 first, µg/m³).
    `calculate_default_transform` for the grid's bounds, and cells outside the source grid are
    NaN. Every hour at one resolution shares one grid, so every frame of a build shares one
    destination transform and one set of bounds.
-2. **Colour** each array through Maps' `colorize` for its kind (`pm25` or `sd`), giving RGBA
-   pixels on the fixed scale: NaN fully transparent, values above the limit in the top colour.
+2. **Colour** each array through Maps' `colorize` for its kind (`pm25`, `diff`, or `sd`), giving
+   RGBA pixels on the fixed scale: NaN fully transparent, values beyond a limit in that end's
+   colour.
 3. **Encode** as PNG, with no text chunks or timestamps, so identical inputs produce identical
    bytes.
 
-Frames are written to `data/frames/pm25_{YYYY-MM-DDTHH}.png` and
-`data/frames/sd_{YYYY-MM-DDTHH}.png`, named for the hour's start.
+Frames are written to `data/frames/{pm25,diff,sd}_{YYYY-MM-DDTHH}.png`, named for the kind and
+the hour's start.
 
 **Bounds.** A frame's `bounds_latlon` is its EPSG:3857 extent with the south-west and north-east
 corners converted to WGS84, written `[[south, west], [north, east]]`. Leaflet's image overlay
@@ -108,7 +118,13 @@ projection the frame was rendered in, so the overlay sits where the cells are.
 **Frame statistics.** For each `kriged` hour, the manifest carries `surface_min`,
 `surface_mean`, and `surface_max` over band 1's finite cells, and `sd_max` over the
 standard-deviation array's finite cells, all on the source grid before reprojection. The page uses
-the maxima to tell whether a frame exceeds its scale's top.
+them to tell whether a frame passes its scale's limits; for the difference view the frame's
+extremes are `surface_min − surface_mean` and `surface_max − surface_mean`.
+
+**Nugget share.** For each `kriged` hour the manifest carries `nugget_share`, the hour's variogram
+nugget divided by its sill (null when the sill is 0). It is the fraction of the hour's variance
+the variogram attributes to noise at a point rather than to spatial structure: an hour near 1 is
+nearly pure noise, and kriging returns most of the grid to the hour's mean.
 
 ### Manifest
 
@@ -121,22 +137,24 @@ latest_hour         ISO 8601 UTC, the latest kriged hour
 window_start        ISO 8601 UTC, the first hour
 window_end          ISO 8601 UTC, exclusive
 scales
-  pm25 / sd         {max, cmap, units, label, stops}
+  pm25 / diff / sd  {min, max, cmap, units, label, stops}
 hours[]             one per hour in the window, ascending and contiguous
   hour              ISO 8601 UTC (the hour's start)
   status            see Hour status
-  pm25_png, sd_png  site-relative paths, null unless kriged
+  pm25_png, diff_png, sd_png   site-relative paths, null unless kriged
   bounds_latlon     [[S, W], [N, E]], null unless kriged
   surface_min, surface_mean, surface_max, sd_max   null unless kriged
   n_sensors         from the fit row, null for missing
   variogram_model   from the fit row, null unless kriged
+  nugget_share      nugget / sill from the fit row, null unless kriged or when the sill is 0
   monitors[]        {site_id, name, lat, lon, obs, qc_flags}
   sensors[]         {sensor_id, lat, lon, pm25_calibrated, fit_status}
 ```
 
-- `scales` comes from `MapSettings` and Maps' scale table. `max` is the fixed upper limit, `cmap`
-  the colormap's name, `units` `µg/m³`, `label` the colorbar label, and `stops` eleven evenly
-  spaced colours from 0 to `max` as `#rrggbb`, sampled by Maps' `colour_stops`. The page draws its
+- `scales` comes from `MapSettings` and Maps' scale table. `min` and `max` are the fixed limits
+  (`min` is 0 for `pm25` and `sd`, `−diff_max` for `diff`), `cmap` the colormap's name, `units`
+  `µg/m³`, `label` the colorbar label, and `stops` eleven evenly spaced colours from `min` to
+  `max` as `#rrggbb`, sampled by Maps' `colour_stops`. The page draws its
   legend from these, so it never names a colormap of its own.
 - `monitors` are the AirNow observations with `observed_at` equal to the hour, joined to their site
   records for `name`, `lat`, and `lon`. `obs` is `pm25_raw` (null when the feed reported none), and
@@ -160,7 +178,7 @@ out/
   index.html  app.js  style.css      copied from src/aqdt/dashboard/web/
   data/
     manifest.json
-    frames/{pm25,sd}_{YYYY-MM-DDTHH}.png
+    frames/{pm25,diff,sd}_{YYYY-MM-DDTHH}.png
 ```
 
 The build replaces `out` only when it is absent, empty, or holds a `data/manifest.json` (a
@@ -183,14 +201,22 @@ The basemap is OpenStreetMap's standard tiles with the attribution their usage p
 serves every file with a ten-minute cache lifetime, and the manifest is the one file that changes
 under the same name each hour. Frames are named by hour and never change once kriged, so they cache
 freely. The page then fits the map to the frames'
-`bounds_latlon`, and shows the latest hour. The current frame is one image overlay at opacity 0.7
-over the basemap.
+`bounds_latlon`, and shows the latest hour. The current frame is one image overlay at opacity 0.85
+over the basemap: opaque enough that neighbouring colours on the scale stay distinguishable, with
+the basemap's roads and rivers still showing through.
 
-**Estimate / Uncertainty.** A two-button toggle (`aria-pressed`) switches every frame between the
-`pm25` and `sd` images. The legend is a horizontal gradient drawn from the active scale's `stops`,
-labelled `0` and the scale's `max` with its units and label. When the current frame's maximum
-(`surface_max` or `sd_max`) exceeds `max`, the legend's upper end shows an arrow and the text
-"values above max shown in top colour".
+**Estimate | Difference | Uncertainty.** A three-button toggle (`aria-pressed`), in that order,
+switches every frame between the `pm25`, `diff`, and `sd` images. The legend is a horizontal
+gradient drawn from the active scale's `stops`, labelled with the scale's `min` and `max`, its
+units, and its label; the Difference view's label is "Above / below this hour's average (µg/m³)".
+When the current frame passes a limit, the legend shows an arrow at that end (▲ at the top, ▼ at
+the bottom) and the text "values beyond the scale shown in its end colours".
+
+**Hour caption.** Under the hour label, a kriged hour is described as
+`Kriged from N sensors · {model} variogram · range {min}–{max} µg/m³ · nugget {P}% of sill`, from
+`n_sensors`, `variogram_model`, `surface_min`, `surface_max`, and `nugget_share` (the nugget part
+is omitted when `nugget_share` is null). A flat-looking hour therefore explains itself: its
+range is narrow, its nugget share high, or both.
 
 **Animation.**
 - A play/pause button and a range slider span every hour of the window, gaps included.
@@ -219,6 +245,8 @@ reads 1–2 h old, and the banner appears once a whole update has been missed.
 **About.** A collapsible panel (`<details>`) states:
 - the data sources: PurpleAir sensors, corrected with the EPA US-wide correction (Barkjohn et al.
   2021) and calibrated against AirNow monitors, then kriged hourly;
+- what the difference map shows: where the estimate is above (red) or below (blue) that hour's
+  own average across the metro;
 - what the uncertainty map shows: the kriging standard deviation, which is lowest near sensors and
   grows with distance from them;
 - that AirNow data are preliminary and unvalidated;
@@ -261,6 +289,8 @@ creation, because only this one test depends on it.
 | Site form | Pre-rendered PNG frames plus one JSON manifest, served static | One image per hour per kind is a few hundred kilobytes at the default resolution, so 48 hours fit comfortably in a Pages site. A static file set needs no server and matches the HLD's no-application-server rule. |
 | Frame CRS | Reprojected to EPSG:3857 at build time | Leaflet stretches an image overlay linearly in Web Mercator. A frame already in that projection sits exactly on the basemap, and the page does no raster work. |
 | Resampling | Nearest neighbour | Each pixel shows a cell's own value, as Maps' figures do. Interpolation would invent values between cells. |
+| Difference view | Estimate minus the hour's mean on a fixed symmetric diverging scale, beside the absolute estimate | Clean hours span a couple of µg/m³, which reads as one colour on an absolute scale that must also hold smoky hours. Subtracting the hour's own mean shows its spatial pattern without stretching the absolute scale per hour, and fixed symmetric limits keep difference maps comparable across hours. |
+| Overlay opacity | 0.85 | Neighbouring colours on a fixed scale differ little, and a basemap seen through a thin overlay washes them together; 0.85 keeps them apart while roads and rivers still show for orientation. |
 | Colour scales | Maps' `colorize` and `colour_stops`, fixed limits from `MapSettings` | One definition of what a value looks like, shared with the evaluation figures. The legend is generated from the same colours, so it cannot drift from the frames. |
 | Gap hours | Listed with a status and no frames | The timeline stays uniform in time, so the animation's speed is the clock's and a missing surface reads as missing. |
 | Default window end | The latest kriged hour, searched back seven days | The page opens on a real surface even when the most recent hours were not kriged. The freshness line says how old that surface is. |

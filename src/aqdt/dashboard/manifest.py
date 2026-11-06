@@ -26,6 +26,7 @@ class _Model(BaseModel):
 
 
 class Scale(_Model):
+    min: float
     max: float = Field(gt=0)
     cmap: str
     units: str
@@ -35,6 +36,7 @@ class Scale(_Model):
 
 class Scales(_Model):
     pm25: Scale
+    diff: Scale
     sd: Scale
 
 
@@ -59,6 +61,7 @@ class Hour(_Model):
     hour: UtcTimestamp
     status: HourStatus
     pm25_png: str | None
+    diff_png: str | None
     sd_png: str | None
     bounds_latlon: tuple[LatLon, LatLon] | None  # [[south, west], [north, east]]
     surface_min: float | None
@@ -67,6 +70,7 @@ class Hour(_Model):
     sd_max: float | None
     n_sensors: int | None
     variogram_model: str | None
+    nugget_share: float | None = Field(ge=0)  # nugget / sill of the hour's variogram
     monitors: list[Monitor]
     sensors: list[Sensor]
 

@@ -53,8 +53,10 @@ header h1 { font-size: 1.4rem; margin: 16px 0 4px; }
 
 .kind { display: flex; gap: 0; }
 .kind button {
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 44px;
-  padding: 0 16px;
+  padding: 0 12px;
   border: 1px solid var(--accent);
   background: var(--bg);
   color: var(--accent);
@@ -62,7 +64,8 @@ header h1 { font-size: 1.4rem; margin: 16px 0 4px; }
   cursor: pointer;
 }
 .kind button:first-child { border-radius: 6px 0 0 6px; }
-.kind button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.kind button + button { border-left: none; }
+.kind button:last-child { border-radius: 0 6px 6px 0; }
 .kind button[aria-pressed="true"] { background: var(--accent); color: #ffffff; }
 
 .legend { font-size: 0.9rem; }
@@ -75,8 +78,9 @@ header h1 { font-size: 1.4rem; margin: 16px 0 4px; }
   border: 1px solid var(--line);
   border-radius: 2px;
 }
-.legend-over { display: block; color: var(--muted); font-size: 0.85rem; }
-.legend-over[hidden] { display: none; }
+.legend-arrow { font-size: 0.8rem; }
+.legend-arrow[hidden], .legend-clipped[hidden] { display: none; }
+.legend-clipped { display: block; color: var(--muted); font-size: 0.85rem; }
 
 .timeline {
   grid-column: 1 / -1;
@@ -126,5 +130,6 @@ a { color: var(--accent); overflow-wrap: anywhere; }
 
 @media (max-width: 640px) {
   .controls { grid-template-columns: 1fr; }
+  .kind button { padding: 0 6px; }
   .map { height: 55vh; }
 }

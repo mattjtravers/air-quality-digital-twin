@@ -52,7 +52,7 @@ def test_manifest_is_fetched_past_the_http_cache():
     code = script()
     fetch = r"fetch\(\s*['\"]data/manifest\.json['\"]\s*,\s*\{[^}]*"
     assert re.search(fetch + r"cache:\s*['\"]no-cache['\"]", code)
-    assert "opacity: 0.7" in code
+    assert "opacity: 0.85" in code
 
 
 # @spec DASH-WEB-005, DASH-WEB-006
@@ -141,7 +141,7 @@ def test_frames_load_the_slider_moves_and_the_toggle_switches(browser, served):
     # opens on the latest hour (12:00), its estimate frame loaded
     assert _overlay_src(page).endswith("pm25_2026-09-14T12.png")
     assert page.evaluate("() => document.querySelector('img.leaflet-image-layer').naturalWidth") > 0
-    assert page.evaluate("() => window.dashboardPreloaded") == 6
+    assert page.evaluate("() => window.dashboardPreloaded") == 9
     label = page.locator("#hour-label").inner_text()
     assert "12:00–13:00 UTC" in label and ("EDT" in label or "ET" in label)
 
@@ -151,9 +151,17 @@ def test_frames_load_the_slider_moves_and_the_toggle_switches(browser, served):
     assert _overlay_src(page).endswith("pm25_2026-09-14T10.png")
     assert "10:00–11:00 UTC" in page.locator("#hour-label").inner_text()
 
+    toggle = page.locator(".kind button").all_inner_texts()
+    assert toggle == ["Estimate", "Difference", "Uncertainty"]
+    page.locator("#kind-diff").click()
+    assert page.locator("#kind-diff").get_attribute("aria-pressed") == "true"
+    assert _overlay_src(page).endswith("diff_2026-09-14T10.png")
+    assert "Above / below this hour's average (µg/m³)" in page.locator("#legend").inner_text()
+
     page.locator("#kind-sd").click()
     assert page.locator("#kind-sd").get_attribute("aria-pressed") == "true"
     assert page.locator("#kind-pm25").get_attribute("aria-pressed") == "false"
+    assert page.locator("#kind-diff").get_attribute("aria-pressed") == "false"
     assert _overlay_src(page).endswith("sd_2026-09-14T10.png")
     alt = page.locator("img.leaflet-image-layer").get_attribute("alt")
     assert "ncertainty" in alt and "10:00" in alt
@@ -206,7 +214,7 @@ def test_gap_hours_monitors_and_sensors(browser, served):
 def test_legend_freshness_and_stale_banner(browser, served):
     page, _ = _open(browser, served)
     legend = page.locator("#legend").inner_text()
-    assert "PM2.5 (µg/m³)" in legend and "12" in legend
+    assert "PM2.5 (µg/m³)" in legend and "10 µg/m³" in legend
     assert page.locator("#freshness").inner_text().startswith("Latest hour 12:00 UTC, updated ")
     # the fixture's latest hour is weeks before any real clock
     banner = page.locator("#stale")
@@ -223,7 +231,7 @@ def test_phone_width_has_no_horizontal_scroll_and_controls_take_the_keyboard(bro
     assert page.locator("#play").get_attribute("aria-pressed") == "true"
     page.keyboard.press("Enter")
     assert page.locator("#play").get_attribute("aria-pressed") == "false"
-    for control in ("#play", "#slider", "#kind-pm25", "#kind-sd"):
+    for control in ("#play", "#slider", "#kind-pm25", "#kind-diff", "#kind-sd"):
         name = page.locator(control).evaluate(
             "e => e.getAttribute('aria-label') || e.textContent.trim()"
         )
@@ -250,3 +258,24 @@ def test_post_create_installs_chromium_without_blocking_the_codespace():
     assert "||" in lines[install], "a failed install is reported, not fatal under set -e"
     (sync,) = [i for i, line in enumerate(lines) if "uv sync --all-groups" in line]
     assert sync < install
+
+
+# @spec DASH-TEST-002, DASH-WEB-015, DASH-WEB-004
+def test_caption_explains_the_hour_and_legend_marks_clipping(browser, served, site):
+    import json
+
+    out, _ = site
+    manifest = json.loads((out / "data" / "manifest.json").read_text())
+    latest = next(h for h in manifest["hours"] if h["hour"] == manifest["latest_hour"])
+    page, _ = _open(browser, served)
+    caption = page.locator("#status").inner_text()
+    expected_range = f"range {latest['surface_min']:.1f}–{latest['surface_max']:.1f} µg/m³"
+    assert expected_range in caption, caption
+    assert f"nugget {round(100 * latest['nugget_share'])}% of sill" in caption, caption
+    # the legend's arrows follow the current hour's extremes against the active scale
+    page.locator("#kind-diff").click()
+    low = latest["surface_min"] - latest["surface_mean"] < manifest["scales"]["diff"]["min"]
+    high = latest["surface_max"] - latest["surface_mean"] > manifest["scales"]["diff"]["max"]
+    assert page.locator("#legend-under").is_visible() == low
+    assert page.locator("#legend-over").is_visible() == high
+    page.close()

@@ -19,9 +19,10 @@ from aqdt.maps.settings import MapSettings
 
 DPI = 300
 _SCALES = {
-    # kind: (colormap, settings attribute holding the upper limit, colorbar label)
-    "pm25": ("viridis", "pm25_max", "PM2.5 (µg/m³)"),
-    "sd": ("magma", "sd_max", "Standard deviation (µg/m³)"),
+    # kind: (colormap, settings attribute holding the limit, symmetric about 0?, colorbar label)
+    "pm25": ("viridis", "pm25_max", False, "PM2.5 (µg/m³)"),
+    "diff": ("RdBu_r", "diff_max", True, "Above / below this hour's average (µg/m³)"),
+    "sd": ("magma", "sd_max", False, "Standard deviation (µg/m³)"),
 }
 SENSOR_STYLE = {"marker": "o", "s": 9, "facecolor": "white", "edgecolor": "black", "zorder": 3}
 MONITOR_STYLE = {"marker": "^", "s": 42, "facecolor": "#f4511e", "edgecolor": "white", "zorder": 4}
@@ -31,7 +32,7 @@ Points = tuple[np.ndarray, np.ndarray]
 @dataclass(frozen=True, eq=False)
 class RenderResult:
     mappable: Any
-    clipped: bool  # some finite cell exceeds the upper limit
+    clipped: bool  # some finite cell lies outside the kind's limits
     clipped_fraction: float  # of finite cells
     max: float  # the array's finite maximum (NaN for an all-NaN array)
 
@@ -44,15 +45,17 @@ class Panel:
     monitors: Points | None = None
 
 
-def _scale(kind: str, settings: MapSettings) -> tuple[str, float, str]:
+def _scale(kind: str, settings: MapSettings) -> tuple[str, float, float, str]:
     if kind not in _SCALES:
         raise ValueError(f"kind must be one of {sorted(_SCALES)}, got {kind!r}")
-    cmap, attribute, label = _SCALES[kind]
-    return cmap, float(getattr(settings, attribute)), label
+    cmap, attribute, symmetric, label = _SCALES[kind]
+    top = float(getattr(settings, attribute))
+    return cmap, -top if symmetric else 0.0, top, label
 
 
-def scale(kind: str, settings: MapSettings | None = None) -> tuple[str, float, str]:
-    """The kind's colormap name, upper limit, and colorbar label."""
+# @spec MAP-SCALE-005, MAP-SCALE-006
+def scale(kind: str, settings: MapSettings | None = None) -> tuple[str, float, float, str]:
+    """The kind's colormap name, lower and upper limits, and colorbar label."""
     return _scale(kind, settings or MapSettings())
 
 
@@ -69,7 +72,7 @@ def render_surface(
     settings: MapSettings | None = None,
 ) -> RenderResult:
     """Draw one surface on its kind's fixed scale; cells above the limit take the top colour."""
-    cmap, top, _ = _scale(kind, settings or MapSettings())
+    cmap, bottom, top, _ = _scale(kind, settings or MapSettings())
     res = grid.resolution_m
     extent = [
         grid.x_min / 1000,
@@ -83,12 +86,12 @@ def render_surface(
         extent=extent,
         origin="upper",
         cmap=cmap,
-        norm=Normalize(vmin=0.0, vmax=top, clip=False),
+        norm=Normalize(vmin=bottom, vmax=top, clip=False),
         interpolation="nearest",
     )
     finite = np.asarray(array, dtype=float)
     finite = finite[np.isfinite(finite)]
-    above = finite > top
+    outside = (finite > top) | (finite < bottom)
     if sensors is not None:
         ax.scatter(
             sensors[0] / 1000,
@@ -112,17 +115,19 @@ def render_surface(
     ax.set_aspect(1.0)
     return RenderResult(
         mappable=image,
-        clipped=bool(above.any()),
-        clipped_fraction=float(above.mean()) if finite.size else 0.0,
+        clipped=bool(outside.any()),
+        clipped_fraction=float(outside.mean()) if finite.size else 0.0,
         max=float(finite.max()) if finite.size else math.nan,
     )
 
 
 # @spec MAP-CLIP-001
 def add_colorbar(fig, mappable, axes, *, kind: str, clipped: bool):
-    """The kind's colorbar, with an arrow at the top end exactly when values were clipped."""
-    _, _, label = _SCALES[kind]
-    colorbar = fig.colorbar(mappable, ax=axes, extend="max" if clipped else "neither")
+    """The kind's colorbar, with arrows at the ends values can pass exactly when values were
+    clipped: the top for one-sided scales, both ends for the symmetric difference scale."""
+    _, _, symmetric, label = _SCALES[kind]
+    extend = ("both" if symmetric else "max") if clipped else "neither"
+    colorbar = fig.colorbar(mappable, ax=axes, extend=extend)
     colorbar.set_label(label)
     return colorbar
 
@@ -187,12 +192,12 @@ def small_multiples(
 # @spec MAP-SCALE-004
 def colorize(array: np.ndarray, *, kind: str, settings: MapSettings | None = None) -> np.ndarray:
     """``(height, width, 4)`` RGBA bytes on the kind's fixed scale, for an image drawn without a
-    figure: values at or below 0 take the bottom colour, values above the limit the top colour,
-    finite cells are opaque and NaN cells fully transparent."""
-    cmap, top, _ = _scale(kind, settings or MapSettings())
+    figure: values at or below the lower limit take the bottom colour, values above the upper
+    limit the top colour, finite cells are opaque and NaN cells fully transparent."""
+    cmap, bottom, top, _ = _scale(kind, settings or MapSettings())
     values = np.asarray(array, dtype=float)
     finite = np.isfinite(values)
-    scaled = np.clip(np.where(finite, values, 0.0) / top, 0.0, 1.0)
+    scaled = np.clip((np.where(finite, values, bottom) - bottom) / (top - bottom), 0.0, 1.0)
     rgba = matplotlib.colormaps[cmap](scaled, bytes=True)
     rgba[..., 3] = np.where(finite, 255, 0)
     return rgba
@@ -200,10 +205,11 @@ def colorize(array: np.ndarray, *, kind: str, settings: MapSettings | None = Non
 
 # @spec MAP-SCALE-005
 def colour_stops(kind: str, n: int = 11, settings: MapSettings | None = None) -> list[str]:
-    """``n`` colours evenly spaced from 0 to the kind's upper limit, as ``#rrggbb``: a legend
-    drawn outside matplotlib in the same colours as ``colorize``."""
-    _, top, _ = _scale(kind, settings or MapSettings())
-    rgba = colorize(np.linspace(0.0, top, n).reshape(1, -1), kind=kind, settings=settings)[0]
+    """``n`` colours evenly spaced from the kind's lower to its upper limit, as ``#rrggbb``: a
+    legend drawn outside matplotlib in the same colours as ``colorize``."""
+    _, bottom, top, _ = _scale(kind, settings or MapSettings())
+    values = np.linspace(bottom, top, n).reshape(1, -1)
+    rgba = colorize(values, kind=kind, settings=settings)[0]
     return [to_hex(colour[:3] / 255.0) for colour in rgba]
 
 

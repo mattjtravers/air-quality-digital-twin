@@ -24,17 +24,20 @@
     <section class="controls" aria-label="Map controls">
       <div class="kind" role="group" aria-label="Map layer">
         <button type="button" id="kind-pm25" aria-pressed="true">Estimate</button>
+        <button type="button" id="kind-diff" aria-pressed="false">Difference</button>
         <button type="button" id="kind-sd" aria-pressed="false">Uncertainty</button>
       </div>
 
       <div id="legend" class="legend" aria-live="polite">
         <span class="legend-title" id="legend-title"></span>
         <div class="legend-row">
-          <span id="legend-min">0</span>
+          <span id="legend-under" class="legend-arrow" hidden aria-hidden="true">▼</span>
+          <span id="legend-min"></span>
           <span class="legend-bar" id="legend-bar" aria-hidden="true"></span>
           <span id="legend-max"></span>
+          <span id="legend-over" class="legend-arrow" hidden aria-hidden="true">▲</span>
         </div>
-        <span id="legend-over" class="legend-over" hidden>▲ values above max shown in top colour</span>
+        <span id="legend-clipped" class="legend-clipped" hidden>values beyond the scale shown in its end colours</span>
       </div>
 
       <div class="timeline">
@@ -61,6 +64,12 @@
         PurpleAir correction (Barkjohn et al. 2021) and calibrated against nearby EPA AirNow
         reference monitors. The calibrated sensor values are then interpolated by ordinary
         kriging, refitted every hour.
+      </p>
+      <p>
+        The difference map shows where the estimate is above (red) or below (blue) that hour's own
+        average across the metro, in µg/m³. On a clean hour the estimate may vary by only a couple
+        of µg/m³ and look almost uniform; the difference map still shows where the higher and
+        lower air is.
       </p>
       <p>
         The uncertainty map shows the kriging standard deviation in µg/m³: how far the estimate

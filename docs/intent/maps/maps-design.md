@@ -38,25 +38,33 @@ RenderResult` draws one surface into a matplotlib `Axes`:
   transparent.
 - `grid` — fusion's `Grid`, which places the image: extent `[x_min, x_min + width·res, y_max −
   height·res, y_max]` in EPSG:26918, shown in kilometres.
-- `kind` — `pm25` (the estimate, µg/m³) or `sd` (the standard deviation, µg/m³; the caller takes
-  the square root of a variance band).
+- `kind` — `pm25` (the estimate, µg/m³), `diff` (the estimate minus the hour's mean, µg/m³; the
+  caller subtracts the mean), or `sd` (the standard deviation, µg/m³; the caller takes the square
+  root of a variance band).
 - `sensors`, `monitors` — optional `(x, y)` arrays in EPSG:26918 metres.
 
 | `kind` | Colormap | Limits | Colorbar label |
 |---|---|---|---|
 | `pm25` | `viridis` | `0` to `settings.pm25_max` | `PM2.5 (µg/m³)` |
+| `diff` | `RdBu_r` | `−settings.diff_max` to `+settings.diff_max` | `Above / below this hour's average (µg/m³)` |
 | `sd` | `magma` | `0` to `settings.sd_max` | `Standard deviation (µg/m³)` |
+
+`diff` shows where the surface sits above (red) or below (blue) its own hourly mean, centred on
+white at zero. An hour whose estimate barely moves on the absolute scale still shows its spatial
+pattern here, because the limits are a few µg/m³ either side of zero rather than the whole range
+of concentrations.
 
 The image is drawn with continuous (unbinned) normalisation and bilinear-free nearest-cell
 sampling, so each cell shows its own value and the gradient comes from the colormap, not from
 levels. Axes are labelled `Easting (km, EPSG:26918)` and `Northing (km)`, with equal aspect.
 
-`RenderResult` carries the matplotlib mappable (for a colorbar), whether any finite cell exceeded
-the upper limit, the fraction of finite cells that did, and the array's maximum.
+`RenderResult` carries the matplotlib mappable (for a colorbar), whether any finite cell fell
+outside the kind's limits, the fraction of finite cells that did, and the array's maximum.
 
 **Colorbars.** `add_colorbar(fig, mappable, ax_or_axes, *, kind, clipped)` labels the bar for the
-kind and draws it with an arrow at the top end (`extend="max"`) when `clipped` is true; without
-clipping the bar ends flat.
+kind and, when `clipped` is true, draws it with arrows at the ends values can pass: the top end
+for `pm25` and `sd` (`extend="max"`), both ends for `diff` (`extend="both"`). Without clipping
+the bar ends flat.
 
 **Markers.** Sensors: small circles, white fill, thin black edge. Monitors: larger upward
 triangles, red-orange fill, white edge. Both carry legend entries when drawn. White-with-black and
@@ -69,14 +77,15 @@ without the figure.
 
 `colorize(array, *, kind, settings=None) -> ndarray` maps a 2-D array to `(height, width, 4)`
 RGBA `uint8` pixels with the kind's colormap and limits, the same scale `render_surface` uses:
-values at or below 0 take the bottom colour, values above the upper limit the top colour, and
+values at or below the lower limit take the bottom colour, values above the upper limit the top
+colour, and
 NaN cells are fully transparent (alpha 0). Finite cells are opaque; the consumer sets any
 overlay opacity.
 
-`scale(kind, settings=None) -> (cmap, max, label)` names the kind's colormap, its upper limit,
-and its colorbar label, so a consumer describing the scale states it from the same table.
-`colour_stops(kind, n=11, settings=None) -> list[str]` returns `n` colours evenly spaced from 0
-to the kind's upper limit as `#rrggbb` strings, so a legend drawn outside matplotlib uses the
+`scale(kind, settings=None) -> (cmap, min, max, label)` names the kind's colormap, its lower and
+upper limits, and its colorbar label, so a consumer describing the scale states it from the same table.
+`colour_stops(kind, n=11, settings=None) -> list[str]` returns `n` colours evenly spaced from the
+kind's lower limit to its upper limit as `#rrggbb` strings, so a legend drawn outside matplotlib uses the
 same colours as the pixels.
 
 ## Small multiples
@@ -104,18 +113,19 @@ column) or 6.5 in (full width). These are the conventions every evaluation figur
 
 | Setting | Variable | Default |
 |---|---|---|
-| `pm25_max` | `AQDT_MAP_PM25_MAX` | 12.0 µg/m³ |
+| `pm25_max` | `AQDT_MAP_PM25_MAX` | 10.0 µg/m³ |
+| `diff_max` | `AQDT_MAP_DIFF_MAX` | 3.0 µg/m³ (the `diff` scale runs from `−diff_max` to `+diff_max`) |
 | `sd_max` | `AQDT_MAP_SD_MAX` | 3.0 µg/m³ |
 
-Both optional; a non-positive value fails validation naming the setting. The defaults are named
-constants in the module (`PM25_MAX`, `SD_MAX`), overridden by the environment in the same way the
+All optional; a non-positive value fails validation naming the setting. The defaults are named
+constants in the module (`PM25_MAX`, `DIFF_MAX`, `SD_MAX`), overridden by the environment in the same way the
 bounding box's `DC_METRO` is by `AQDT_BBOX`.
 
 ## Package Layout
 
 ```
 src/aqdt/maps/
-  settings.py   # MapSettings, PM25_MAX, SD_MAX
+  settings.py   # MapSettings, PM25_MAX, DIFF_MAX, SD_MAX
   render.py     # render_surface, add_colorbar, small_multiples, save_figure, colorize,
                 #   colour_stops
   surface.py    # read_surface
@@ -130,8 +140,9 @@ Dependency: `matplotlib`, in the `analysis` dependency group.
 |----------|--------|-----------|
 | PM2.5 colormap | `viridis` | Perceptually uniform and monotonic in lightness, legible in greyscale and for common colour-vision deficiencies; its light top end puts attention on the high concentrations. |
 | Uncertainty colormap | `magma` | Also perceptually uniform, and visibly different from `viridis`, so an uncertainty map is never mistaken for a concentration map. |
-| Colour limits | Fixed from settings, 0–12 µg/m³ for PM2.5 | Hours are comparable only on a common scale. 12 µg/m³ spans the clean-to-moderate range the D.C. network reports most hours and sits near the 9 µg/m³ annual standard, so ordinary hours use the full ramp. |
-| Out-of-range values | Clipped to the top colour, colorbar arrow, clipping reported | The scale stays fixed and the reader is told, rather than the scale silently stretching. |
+| Colour limits | Fixed from settings, 0–10 µg/m³ for PM2.5 | Hours are comparable only on a common scale. 10 µg/m³ spans the clean-to-moderate range the D.C. network reports most hours and sits just above the 9 µg/m³ annual standard, so ordinary hours use most of the ramp and anything above the standard reads in the top colours. |
+| Difference colormap | `RdBu_r`, symmetric fixed limits (±3 µg/m³) | A diverging map centred on zero shows where an hour sits above or below its own mean; red–blue stays distinguishable for the common colour-vision deficiencies, and white at zero keeps "no difference" neutral. Symmetric fixed limits keep hours comparable with each other, as on the other scales. |
+| Out-of-range values | Clipped to the end colour, colorbar arrow at that end, clipping reported | The scale stays fixed and the reader is told, rather than the scale silently stretching. |
 | Rendering library | matplotlib | The standard for publication figures in the scientific Python ecosystem; its colormaps colour both the report figures and the dashboard's bare images. |
 | Bare-image colouring | `colorize` and `colour_stops` beside `render_surface`, sharing its scale table | A frame with no axes still has to read on the same scale as a figure; one scale table means the two cannot diverge. |
 | Coordinates shown | EPSG:26918 kilometres | The grid's native CRS; no resampling, and distances read directly off the axes. |

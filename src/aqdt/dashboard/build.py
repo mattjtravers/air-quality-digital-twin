@@ -130,8 +130,9 @@ def _surfaces(uris: list[str]) -> Iterator[SurfaceArrays | Exception]:
 
 def _scales(settings: MapSettings) -> Scales:
     def one(kind: str) -> Scale:
-        cmap, top, label = scale(kind, settings)
+        cmap, bottom, top, label = scale(kind, settings)
         return Scale(
+            min=bottom,
             max=top,
             cmap=cmap,
             units=UNITS,
@@ -139,7 +140,7 @@ def _scales(settings: MapSettings) -> Scales:
             stops=colour_stops(kind, N_STOPS, settings=settings),
         )
 
-    return Scales(pm25=one("pm25"), sd=one("sd"))
+    return Scales(pm25=one("pm25"), diff=one("diff"), sd=one("sd"))
 
 
 def _monitors(observations: pd.DataFrame, sites: pd.DataFrame) -> dict[datetime, list[Monitor]]:
@@ -192,23 +193,33 @@ def _finite(array: np.ndarray) -> np.ndarray:
     return array[np.isfinite(array)]
 
 
+# @spec DASH-FRAME-006
+def nugget_share(nugget, sill) -> float | None:
+    """The share of the hour's variance its variogram puts in the nugget: noise at a point rather
+    than spatial structure. None when the sill is 0 or either value is missing."""
+    if nugget is None or sill is None or pd.isna(nugget) or pd.isna(sill) or float(sill) == 0:
+        return None
+    return round(float(nugget) / float(sill), 2)
+
+
 # @spec DASH-FRAME-001, DASH-FRAME-002, DASH-FRAME-005
 def _render_hour(site: Path, hour: datetime, surface: SurfaceArrays, settings: MapSettings) -> dict:
-    """Write the hour's two frames; return its surface fields for the manifest."""
+    """Write the hour's three frames; return its surface fields for the manifest."""
     stamp = hour.strftime("%Y-%m-%dT%H")
+    pm25 = _finite(surface.pm25)
+    mean = pm25.mean() if pm25.size else np.nan
     sd = np.sqrt(np.clip(surface.variance, 0, None))
     fields: dict = {}
-    for kind, array in (("pm25", surface.pm25), ("sd", sd)):
+    for kind, array in (("pm25", surface.pm25), ("diff", surface.pm25 - mean), ("sd", sd)):
         mercator, transform = to_web_mercator(array, surface.transform)
         path = f"{FRAMES}/{kind}_{stamp}.png"
         (site / path).write_bytes(encode_png(colorize(mercator, kind=kind, settings=settings)))
         fields[f"{kind}_png"] = path
         fields["bounds_latlon"] = bounds_latlon(mercator.shape, transform)
-    pm25 = _finite(surface.pm25)
     sds = _finite(sd)
     fields |= {
         "surface_min": _round(pm25.min()) if pm25.size else None,
-        "surface_mean": _round(pm25.mean()) if pm25.size else None,
+        "surface_mean": _round(mean) if pm25.size else None,
         "surface_max": _round(pm25.max()) if pm25.size else None,
         "sd_max": _round(sds.max()) if sds.size else None,
     }
@@ -217,6 +228,7 @@ def _render_hour(site: Path, hour: datetime, surface: SurfaceArrays, settings: M
 
 _NO_SURFACE = {
     "pm25_png": None,
+    "diff_png": None,
     "sd_png": None,
     "bounds_latlon": None,
     "surface_min": None,
@@ -310,6 +322,9 @@ def build_site(
                     **surface_fields.get(hour, _NO_SURFACE),
                     n_sensors=None if fit is None else int(fit.n_sensors),
                     variogram_model=fit.variogram_model if status == HourStatus.kriged else None,
+                    nugget_share=(
+                        nugget_share(fit.nugget, fit.sill) if status == HourStatus.kriged else None
+                    ),
                     monitors=monitors.get(hour, []),
                     sensors=sensors.get(hour, []),
                 )
@@ -350,7 +365,7 @@ def build_site(
         window_end=window_end,
         latest_hour=latest,
         hours=dict(counts),
-        frames=2 * len(surface_fields),
+        frames=3 * len(surface_fields),
         site_bytes=site_bytes,
         elapsed_s=elapsed,
     )

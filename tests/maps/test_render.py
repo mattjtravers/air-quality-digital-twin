@@ -12,7 +12,7 @@ from pydantic import ValidationError  # noqa: E402
 
 from aqdt.fusion.grid import grid_for  # noqa: E402
 from aqdt.maps import render  # noqa: E402
-from aqdt.maps.settings import PM25_MAX, SD_MAX, MapSettings  # noqa: E402
+from aqdt.maps.settings import DIFF_MAX, PM25_MAX, SD_MAX, MapSettings  # noqa: E402
 from aqdt.observation_store.schemas import DC_METRO  # noqa: E402
 
 GRID = grid_for(DC_METRO, 4000)
@@ -20,8 +20,8 @@ GRID = grid_for(DC_METRO, 4000)
 
 @pytest.fixture
 def settings(monkeypatch):
-    monkeypatch.delenv("AQDT_MAP_PM25_MAX", raising=False)
-    monkeypatch.delenv("AQDT_MAP_SD_MAX", raising=False)
+    for name in ("AQDT_MAP_PM25_MAX", "AQDT_MAP_DIFF_MAX", "AQDT_MAP_SD_MAX"):
+        monkeypatch.delenv(name, raising=False)
     return MapSettings()
 
 
@@ -68,18 +68,36 @@ def test_render_result_reports_clipping(ax, settings):
     assert np.allclose(cmap(norm(30.0)), cmap(1.0))
 
 
+# @spec MAP-RENDER-003, MAP-CLIP-002
+def test_difference_clips_at_both_ends(ax, settings):
+    inside = np.linspace(-DIFF_MAX, DIFF_MAX, GRID.n_cells).reshape(GRID.height, GRID.width)
+    clean = render.render_surface(ax, inside, GRID, kind="diff", settings=settings)
+    assert not clean.clipped
+    low = inside - 1.0  # some cells below −DIFF_MAX, none above +DIFF_MAX
+    result = render.render_surface(ax, low, GRID, kind="diff", settings=settings)
+    assert result.clipped
+    assert result.clipped_fraction == pytest.approx(float((low < -DIFF_MAX).mean()))
+    cmap, norm = result.mappable.get_cmap(), result.mappable.norm
+    assert np.allclose(cmap(norm(-10.0)), cmap(0.0))
+
+
 # --- Scales -----------------------------------------------------------------------------------
 
 
-# @spec MAP-SCALE-001, MAP-SCALE-002, MAP-SCALE-003
+# @spec MAP-SCALE-001, MAP-SCALE-002, MAP-SCALE-003, MAP-SCALE-006
 @pytest.mark.parametrize(
-    ("kind", "cmap", "top"), [("pm25", "viridis", PM25_MAX), ("sd", "magma", SD_MAX)]
+    ("kind", "cmap", "bottom", "top"),
+    [
+        ("pm25", "viridis", 0.0, PM25_MAX),
+        ("diff", "RdBu_r", -DIFF_MAX, DIFF_MAX),
+        ("sd", "magma", 0.0, SD_MAX),
+    ],
 )
-def test_each_kind_has_a_fixed_uniform_scale(ax, settings, kind, cmap, top):
+def test_each_kind_has_a_fixed_uniform_scale(ax, settings, kind, cmap, bottom, top):
     for array in (_array(1.0), _array(50.0)):
         result = render.render_surface(ax, array, GRID, kind=kind, settings=settings)
         assert result.mappable.get_cmap().name == cmap
-        assert (result.mappable.norm.vmin, result.mappable.norm.vmax) == (0.0, top)
+        assert (result.mappable.norm.vmin, result.mappable.norm.vmax) == (bottom, top)
         assert type(result.mappable.norm).__name__ == "Normalize"
 
 
@@ -88,14 +106,19 @@ def test_each_kind_has_a_fixed_uniform_scale(ax, settings, kind, cmap, top):
 
 # @spec MAP-CLIP-001
 @pytest.mark.parametrize(
-    ("kind", "label"), [("pm25", "PM2.5 (µg/m³)"), ("sd", "Standard deviation (µg/m³)")]
+    ("kind", "label", "extend"),
+    [
+        ("pm25", "PM2.5 (µg/m³)", "max"),
+        ("diff", "Above / below this hour's average (µg/m³)", "both"),
+        ("sd", "Standard deviation (µg/m³)", "max"),
+    ],
 )
-def test_colorbar_label_and_arrow_only_when_clipped(ax, settings, kind, label):
+def test_colorbar_label_and_arrow_only_when_clipped(ax, settings, kind, label, extend):
     result = render.render_surface(ax, _array(), GRID, kind=kind, settings=settings)
     flat = render.add_colorbar(ax.figure, result.mappable, ax, kind=kind, clipped=False)
     arrow = render.add_colorbar(ax.figure, result.mappable, ax, kind=kind, clipped=True)
     assert flat.ax.get_ylabel() == label
-    assert flat.extend == "neither" and arrow.extend == "max"
+    assert flat.extend == "neither" and arrow.extend == extend
 
 
 # --- Markers ----------------------------------------------------------------------------------
@@ -200,11 +223,12 @@ def test_save_figure_is_300_dpi_and_tight(tmp_path, settings):
 
 # @spec MAP-CFG-001, MAP-CFG-002
 def test_settings_defaults_environment_and_validation(monkeypatch, settings):
-    assert (PM25_MAX, SD_MAX) == (12.0, 3.0)
-    assert (settings.pm25_max, settings.sd_max) == (PM25_MAX, SD_MAX)
+    assert (PM25_MAX, DIFF_MAX, SD_MAX) == (10.0, 3.0, 3.0)
+    assert (settings.pm25_max, settings.diff_max, settings.sd_max) == (PM25_MAX, DIFF_MAX, SD_MAX)
     monkeypatch.setenv("AQDT_MAP_PM25_MAX", "20")
-    assert MapSettings().pm25_max == 20.0
-    for field in ("pm25_max", "sd_max"):
+    monkeypatch.setenv("AQDT_MAP_DIFF_MAX", "5")
+    assert (MapSettings().pm25_max, MapSettings().diff_max) == (20.0, 5.0)
+    for field in ("pm25_max", "diff_max", "sd_max"):
         with pytest.raises(ValidationError, match=field):
             MapSettings(**{field: 0})
 
@@ -217,21 +241,29 @@ def test_rendering_needs_no_display():
 # --- Bare images ------------------------------------------------------------------------------
 
 
-def _expected_rgba(value: float, cmap: str, top: float) -> np.ndarray:
-    colour = matplotlib.colormaps[cmap](min(max(value / top, 0.0), 1.0), bytes=True)
-    return np.asarray(colour, dtype=np.uint8)
+def _expected_rgba(value: float, cmap: str, top: float, bottom: float = 0.0) -> np.ndarray:
+    fraction = min(max((value - bottom) / (top - bottom), 0.0), 1.0)
+    return np.asarray(matplotlib.colormaps[cmap](fraction, bytes=True), dtype=np.uint8)
 
 
-# @spec MAP-SCALE-004
-@pytest.mark.parametrize("kind,cmap,top", [("pm25", "viridis", PM25_MAX), ("sd", "magma", SD_MAX)])
-def test_colorize_maps_values_on_the_fixed_scale(settings, kind, cmap, top):
-    array = np.array([[-1.0, 0.0, top / 2], [top, top * 3, np.nan]], dtype=np.float32)
+BARE_SCALES = [
+    ("pm25", "viridis", 0.0, PM25_MAX),
+    ("diff", "RdBu_r", -DIFF_MAX, DIFF_MAX),
+    ("sd", "magma", 0.0, SD_MAX),
+]
+
+
+# @spec MAP-SCALE-004, MAP-SCALE-006
+@pytest.mark.parametrize("kind,cmap,bottom,top", BARE_SCALES)
+def test_colorize_maps_values_on_the_fixed_scale(settings, kind, cmap, bottom, top):
+    mid = (bottom + top) / 2
+    array = np.array([[bottom - 1, bottom, mid], [top, top * 3, np.nan]], dtype=np.float32)
     rgba = render.colorize(array, kind=kind, settings=settings)
     assert rgba.shape == (2, 3, 4) and rgba.dtype == np.uint8
-    np.testing.assert_array_equal(rgba[0, 0], rgba[0, 1])  # at or below 0: bottom colour
-    np.testing.assert_array_equal(rgba[1, 1], rgba[1, 0])  # above the limit: top colour
-    for (row, col), value in {(0, 1): 0.0, (0, 2): top / 2, (1, 0): top}.items():
-        np.testing.assert_array_equal(rgba[row, col], _expected_rgba(value, cmap, top))
+    np.testing.assert_array_equal(rgba[0, 0], rgba[0, 1])  # at or below the lower limit
+    np.testing.assert_array_equal(rgba[1, 1], rgba[1, 0])  # above the upper limit
+    for (row, col), value in {(0, 1): bottom, (0, 2): mid, (1, 0): top}.items():
+        np.testing.assert_array_equal(rgba[row, col], _expected_rgba(value, cmap, top, bottom))
     assert (rgba[[0, 0, 0, 1, 1], [0, 1, 2, 0, 1], 3] == 255).all()
     assert rgba[1, 2, 3] == 0
 
@@ -251,11 +283,11 @@ def test_colorize_follows_the_settings(monkeypatch):
 
 
 # @spec MAP-SCALE-005
-@pytest.mark.parametrize("kind,top", [("pm25", PM25_MAX), ("sd", SD_MAX)])
-def test_colour_stops_match_colorize(settings, kind, top):
+@pytest.mark.parametrize("kind,cmap,bottom,top", BARE_SCALES)
+def test_colour_stops_match_colorize(settings, kind, cmap, bottom, top):
     stops = render.colour_stops(kind, 11, settings=settings)
     assert len(stops) == 11
-    values = np.linspace(0.0, top, 11).reshape(1, -1)
+    values = np.linspace(bottom, top, 11).reshape(1, -1)
     rgba = render.colorize(values, kind=kind, settings=settings)[0]
     for stop, colour in zip(stops, rgba):
         assert stop == "#%02x%02x%02x" % tuple(int(c) for c in colour[:3])
@@ -264,7 +296,13 @@ def test_colour_stops_match_colorize(settings, kind, top):
 
 # @spec MAP-SCALE-005
 def test_scale_names_the_colormap_limit_and_label(settings):
-    assert render.scale("pm25", settings) == ("viridis", PM25_MAX, "PM2.5 (µg/m³)")
-    assert render.scale("sd", settings) == ("magma", SD_MAX, "Standard deviation (µg/m³)")
+    assert render.scale("pm25", settings) == ("viridis", 0.0, PM25_MAX, "PM2.5 (µg/m³)")
+    assert render.scale("diff", settings) == (
+        "RdBu_r",
+        -DIFF_MAX,
+        DIFF_MAX,
+        "Above / below this hour's average (µg/m³)",
+    )
+    assert render.scale("sd", settings) == ("magma", 0.0, SD_MAX, "Standard deviation (µg/m³)")
     with pytest.raises(ValueError):
         render.scale("aqi", settings)

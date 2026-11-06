@@ -2,16 +2,30 @@
 // Everything shown is precomputed by `aqdt dashboard build`; this file only chooses what to draw.
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
 // @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011, DASH-WEB-012
-// @spec DASH-WEB-014
+// @spec DASH-WEB-014, DASH-WEB-015
 (function () {
   "use strict";
 
   const FRAME_MS = 500;
   const STALE_AFTER_MS = 2 * 3600 * 1000; // measured from the end of the latest hour
   const HOUR_MS = 3600 * 1000;
+  // the current hour's extremes on each kind's scale, from the manifest's frame statistics
   const KINDS = {
-    pm25: { name: "Estimate", alt: "Estimated PM2.5", maxField: "surface_max" },
-    sd: { name: "Uncertainty", alt: "Uncertainty (standard deviation) of PM2.5", maxField: "sd_max" },
+    pm25: {
+      name: "Estimate",
+      alt: "Estimated PM2.5",
+      extremes: (h) => [h.surface_min, h.surface_max],
+    },
+    diff: {
+      name: "Difference",
+      alt: "PM2.5 difference from this hour's average",
+      extremes: (h) => [h.surface_min - h.surface_mean, h.surface_max - h.surface_mean],
+    },
+    sd: {
+      name: "Uncertainty",
+      alt: "Uncertainty (standard deviation) of PM2.5",
+      extremes: (h) => [0, h.sd_max],
+    },
   };
   const REASONS = {
     insufficient_points: "too few sensors reported this hour to krige a surface",
@@ -55,7 +69,8 @@
   }
 
   function formatValue(value) {
-    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+    const text = Number.isInteger(value) ? String(value) : value.toFixed(1);
+    return text.replace("-", "−");
   }
 
   function escapeHtml(text) {
@@ -124,9 +139,30 @@
     const scale = state.manifest.scales[state.kind];
     el("legend-title").textContent = `${KINDS[state.kind].name}: ${scale.label}`;
     el("legend-bar").style.background = `linear-gradient(to right, ${scale.stops.join(", ")})`;
-    el("legend-max").textContent = `${formatValue(scale.max)} ${scale.units}`;
-    const top = hour[KINDS[state.kind].maxField];
-    el("legend-over").hidden = !(top !== null && top > scale.max);
+    el("legend-min").textContent = formatValue(scale.min);
+    el("legend-max").textContent = `${scale.min < 0 ? "+" : ""}${formatValue(scale.max)} ${scale.units}`;
+    let under = false;
+    let over = false;
+    if (hour.status === "kriged") {
+      const [low, high] = KINDS[state.kind].extremes(hour);
+      under = low < scale.min;
+      over = high > scale.max;
+    }
+    el("legend-under").hidden = !under;
+    el("legend-over").hidden = !over;
+    el("legend-clipped").hidden = !(under || over);
+  }
+
+  function caption(hour) {
+    const parts = [
+      `Kriged from ${hour.n_sensors} sensors`,
+      `${hour.variogram_model} variogram`,
+      `range ${hour.surface_min.toFixed(1)}–${hour.surface_max.toFixed(1)} µg/m³`,
+    ];
+    if (hour.nugget_share !== null) {
+      parts.push(`nugget ${Math.round(100 * hour.nugget_share)}% of sill`);
+    }
+    return parts.join(" · ");
   }
 
   function show(index) {
@@ -142,7 +178,7 @@
       const url = hour[`${state.kind}_png`];
       const alt = `${KINDS[state.kind].alt}, ${label}`;
       if (!overlay) {
-        overlay = L.imageOverlay(url, hour.bounds_latlon, { opacity: 0.7, alt, interactive: false });
+        overlay = L.imageOverlay(url, hour.bounds_latlon, { opacity: 0.85, alt, interactive: false });
         overlay.addTo(map);
       } else {
         overlay.setUrl(url);
@@ -150,9 +186,7 @@
         if (!map.hasLayer(overlay)) overlay.addTo(map);
       }
       overlay.getElement().setAttribute("alt", alt);
-      const mean = hour.surface_mean === null ? "" : ` · mean ${hour.surface_mean.toFixed(1)} µg/m³`;
-      el("status").textContent =
-        `Kriged from ${hour.n_sensors} sensors · ${hour.variogram_model} variogram${mean}`;
+      el("status").textContent = caption(hour);
     } else {
       if (overlay && map.hasLayer(overlay)) map.removeLayer(overlay);
       el("status").textContent = `No surface: ${REASONS[hour.status] || hour.status}.`;
@@ -173,7 +207,7 @@
     window.dashboardPreloaded = 0;
     const urls = [];
     for (const hour of state.manifest.hours) {
-      if (hour.status === "kriged") urls.push(hour.pm25_png, hour.sd_png);
+      if (hour.status === "kriged") urls.push(hour.pm25_png, hour.diff_png, hour.sd_png);
     }
     return Promise.all(urls.map((url) => new Promise((resolve) => {
       const image = new Image();
