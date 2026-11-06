@@ -220,8 +220,10 @@ range is narrow, its nugget share high, or both.
 
 **Animation.**
 - A play/pause button and a range slider span every hour of the window, gaps included.
-- The hour label shows the hour in UTC (`14:00–15:00 UTC`) and in Eastern time through `Intl`
-  with `America/New_York`, so daylight saving is handled by the browser.
+- The hour label shows the hour's date and span in Eastern time on a 12-hour clock, with the
+  zone's abbreviation: `Fri, Nov 6 · 2:00 PM–3:00 PM EST`. The date is the Eastern date of the
+  hour's start. When the start and end fall in different zones (the hours daylight saving begins
+  and ends), each end carries its own abbreviation: `1:00 AM EDT–1:00 AM EST`.
 - All frames are preloaded before playback starts. Playback advances one hour per 500 ms and loops
   from the end back to the start.
 - On a gap hour no overlay is drawn, and the label says "No surface: {reason}" in words for its
@@ -231,12 +233,18 @@ range is narrow, its nugget share high, or both.
 competes with the surface's colour scale.
 - AirNow monitors are hollow triangles labelled with the observed value to one decimal, followed
   by `*` when the observation carries any QC flag. A null observation is labelled `n/a`.
+- Every monitor's label stays readable wherever monitors sit close together. A label sits to the
+  right of its triangle unless that would overlap a label already placed or another monitor's
+  triangle; it then takes the first clear side of left, below, and above, and stays on the right
+  when no side is clear. Labels are placed one monitor at a time in manifest order, and placed
+  afresh whenever the hour shown or the zoom changes, since both change what is close on screen
+  and how wide each label is.
 - PurpleAir sensors are small hollow circles, drawn with a fully transparent fill so that the
   whole disc, not only its outline, takes a click or tap. Clicking or tapping one opens a popup
   with the sensor ID, the calibrated value (or "no calibrated value"), and the fit status.
 
-**Freshness.** A line under the title reads `Latest hour HH:00 UTC, updated HH:MM UTC`, from
-`latest_hour` and `generated_at`. An amber banner appears when the latest hour *ended* more than
+**Freshness.** A line under the title reads `Latest hour 2:00 PM EST, updated 3:55 PM EST`,
+from `latest_hour` and `generated_at` in Eastern time, formatted as the hour label's times are. An amber banner appears when the latest hour *ended* more than
 two hours before the viewer's clock, that is when `now − (latest_hour + 1 h) > 2 h`. It reports
 how old the latest hour is. The age counts from the hour's end because the hour just kriged began
 nearly two hours before the build that publishes it. Measured from the end, a page on schedule
@@ -296,6 +304,8 @@ creation, because only this one test depends on it.
 | Default window end | The latest kriged hour, searched back seven days | The page opens on a real surface even when the most recent hours were not kriged. The freshness line says how old that surface is. |
 | Markers | Hollow triangles (monitors) and hollow circles (sensors), no fill | On a coloured surface over a coloured basemap, a filled marker reads as a value on the scale. Outlines locate a site without competing with the surface. |
 | Monitor label | Observed value as text, `*` when flagged | The reference value is the number a reader compares the surface with, and the asterisk keeps a flagged hour visible without hiding the value (flag, never drop). |
+| Displayed time | Eastern time only, through `Intl` with `America/New_York`, 12-hour clock with the zone's abbreviation | The twin covers the D.C. metro, whose readers keep Eastern time; the archive and manifest stay in UTC, and the page converts only for display. `America/New_York` lets the browser handle daylight saving, and the abbreviation tells apart the two 1 AM hours of the autumn change. |
+| Label placement | In the page, greedy over four sides of the triangle, redone on each hour and zoom | Whether two labels collide depends on the zoom and on each label's text, which only the page knows. Four fixed sides keep each label beside its own triangle, so no leader line is needed to tell which value belongs to which monitor; manifest order makes the placement the same on every load. |
 | Leaflet delivery | cdnjs, version-pinned with an SRI hash | No build step and no vendored library to update, and the integrity hash makes the pinned file the only one the browser will run. |
 | Basemap | OpenStreetMap standard tiles with attribution | Free, familiar, and openly licensed. The page's traffic is far inside the tile usage policy. |
 | Freshness threshold | Banner when the latest hour ended more than 2 h ago | An on-schedule page is 1–2 h behind the clock by the hour's end, so the banner marks one missed update and no false alarm. |

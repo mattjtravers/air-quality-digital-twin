@@ -127,6 +127,10 @@ a { color: var(--accent); overflow-wrap: anywhere; }
   border-radius: 3px;
   white-space: nowrap;
 }
+/* the side a label takes when the right would cover a nearby monitor (DASH-WEB-016) */
+.monitor-label[data-side="left"] { left: auto; right: 18px; }
+.monitor-label[data-side="below"] { left: 50%; top: 15px; transform: translateX(-50%); }
+.monitor-label[data-side="above"] { left: 50%; top: auto; bottom: 15px; transform: translateX(-50%); }
 
 @media (max-width: 640px) {
   .controls { grid-template-columns: 1fr; }

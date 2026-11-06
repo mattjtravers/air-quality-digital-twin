@@ -2,7 +2,7 @@
 // Everything shown is precomputed by `aqdt dashboard build`; this file only chooses what to draw.
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
 // @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011, DASH-WEB-012
-// @spec DASH-WEB-014, DASH-WEB-015
+// @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016
 (function () {
   "use strict";
 
@@ -35,26 +35,33 @@
   };
 
   const el = (id) => document.getElementById(id);
-  const pad = (n) => String(n).padStart(2, "0");
-  const utcHHMM = (d) => `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  // every time shown is Eastern; the browser's time zone data handles daylight saving
   const eastern = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
-    hourCycle: "h23",
+    hour12: true,
     timeZoneName: "short",
   });
-  const dateFormat = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "UTC",
+  const easternDate = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
     weekday: "short",
-    day: "numeric",
     month: "short",
+    day: "numeric",
   });
 
   function easternParts(date) {
     const parts = eastern.formatToParts(date);
     const get = (type) => (parts.find((p) => p.type === type) || {}).value || "";
-    return { time: `${get("hour")}:${get("minute")}`, zone: get("timeZoneName") };
+    return {
+      time: `${get("hour")}:${get("minute")} ${get("dayPeriod")}`,
+      zone: get("timeZoneName"),
+    };
+  }
+
+  function easternTime(date) {
+    const { time, zone } = easternParts(date);
+    return `${time} ${zone}`;
   }
 
   function hourLabel(iso) {
@@ -62,10 +69,10 @@
     const end = new Date(start.getTime() + HOUR_MS);
     const s = easternParts(start);
     const e = easternParts(end);
-    return (
-      `${dateFormat.format(start)} · ${utcHHMM(start)}–${utcHHMM(end)} UTC ` +
-      `(${s.time}–${e.time} ${e.zone})`
-    );
+    const span = s.zone === e.zone
+      ? `${s.time}–${e.time} ${e.zone}`
+      : `${s.time} ${s.zone}–${e.time} ${e.zone}`; // the hours daylight saving begins and ends
+    return `${easternDate.format(start)} · ${span}`;
   }
 
   function formatValue(value) {
@@ -81,6 +88,8 @@
 
   const state = { manifest: null, index: 0, kind: "pm25", timer: null, preload: null };
   let map, overlay, monitorLayer, sensorLayer;
+  let monitorMarkers = [];
+  const LABEL_SIDES = ["right", "left", "below", "above"];
 
   function triangleIcon(label) {
     const svg =
@@ -100,9 +109,36 @@
     return monitor.obs.toFixed(1) + (monitor.qc_flags.length ? "*" : "");
   }
 
+  function overlaps(a, b) {
+    return Math.min(a.right, b.right) > Math.max(a.left, b.left) &&
+      Math.min(a.bottom, b.bottom) > Math.max(a.top, b.top);
+  }
+
+  // Each label, in manifest order, takes the first side of its triangle clear of the labels
+  // already placed and of every other monitor's triangle, or the right when none is clear.
+  function placeLabels() {
+    const icons = monitorMarkers.map((m) => m.getElement()).filter(Boolean);
+    const triangles = icons.map((icon) => icon.querySelector("svg").getBoundingClientRect());
+    const placed = [];
+    icons.forEach((icon, i) => {
+      const label = icon.querySelector(".monitor-label");
+      const others = triangles.filter((_, j) => j !== i);
+      const clear = (box) => !placed.some((p) => overlaps(box, p)) &&
+        !others.some((t) => overlaps(box, t));
+      let side = LABEL_SIDES.find((candidate) => {
+        label.dataset.side = candidate;
+        return clear(label.getBoundingClientRect());
+      });
+      if (!side) side = "right";
+      label.dataset.side = side;
+      placed.push(label.getBoundingClientRect());
+    });
+  }
+
   function drawPoints(hour) {
     monitorLayer.clearLayers();
     sensorLayer.clearLayers();
+    monitorMarkers = [];
     for (const sensor of hour.sensors) {
       const value = sensor.pm25_calibrated === null
         ? "no calibrated value"
@@ -126,13 +162,14 @@
     for (const monitor of hour.monitors) {
       const name = monitor.name || monitor.site_id;
       const text = monitorLabel(monitor);
-      L.marker([monitor.lat, monitor.lon], {
+      monitorMarkers.push(L.marker([monitor.lat, monitor.lon], {
         icon: triangleIcon(text),
         keyboard: false,
         title: `${name}: ${text === "n/a" ? "no value" : text + " µg/m³"}`,
         alt: `AirNow monitor ${name}`,
-      }).addTo(monitorLayer);
+      }).addTo(monitorLayer));
     }
+    placeLabels();
   }
 
   function drawLegend(hour) {
@@ -239,7 +276,7 @@
     const latest = new Date(manifest.latest_hour);
     const generated = new Date(manifest.generated_at);
     el("freshness").textContent =
-      `Latest hour ${utcHHMM(latest)} UTC, updated ${utcHHMM(generated)} UTC`;
+      `Latest hour ${easternTime(latest)}, updated ${easternTime(generated)}`;
     const ageMs = Date.now() - (latest.getTime() + HOUR_MS);
     const stale = el("stale");
     if (ageMs > STALE_AFTER_MS) {
@@ -266,6 +303,7 @@
     }).addTo(map);
     sensorLayer = L.layerGroup().addTo(map);
     monitorLayer = L.layerGroup().addTo(map);
+    map.on("zoomend", placeLabels); // what is close on screen changes with the zoom
 
     const latestIndex = hours.findIndex((h) => h.hour === state.manifest.latest_hour);
     const framed = hours.find((h) => h.bounds_latlon) || hours[latestIndex];

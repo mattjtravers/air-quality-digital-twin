@@ -3,9 +3,12 @@ loads a built site in a real browser."""
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import http.server
+import json
 import re
+import shutil
 import threading
 from pathlib import Path
 
@@ -104,15 +107,44 @@ def browser():
         browser.close()
 
 
-@pytest.fixture(scope="module")
-def served(site):
-    out, _ = site
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(out))
+@contextlib.contextmanager
+def _serve(directory: Path):
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}/"
-    server.shutdown()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+
+
+@pytest.fixture(scope="module")
+def served(site):
+    out, _ = site
+    with _serve(out) as url:
+        yield url
+
+
+@pytest.fixture(scope="module")
+def crowded(site, tmp_path_factory):
+    """The built site with its manifest edited: in every hour the first three monitors stand on
+    one spot, and the first two hours are restamped to an evening hour (a UTC date ahead of the
+    Eastern one) and to the autumn hour that daylight saving ends in."""
+    out, _ = site
+    copy = tmp_path_factory.mktemp("crowded") / "site"
+    shutil.copytree(out, copy)
+    path = copy / "data" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    for hour in manifest["hours"]:
+        first, second, third = hour["monitors"][:3]
+        second["lat"], second["lon"] = first["lat"], first["lon"] + 0.0003
+        third["lat"], third["lon"] = first["lat"], first["lon"]
+    manifest["hours"][0]["hour"] = "2026-09-15T01:00:00Z"
+    manifest["hours"][1]["hour"] = "2026-11-01T05:00:00Z"
+    path.write_text(json.dumps(manifest))
+    with _serve(copy) as url:
+        yield url
 
 
 def _open(browser, url, *, width=1200, height=900):
@@ -143,13 +175,13 @@ def test_frames_load_the_slider_moves_and_the_toggle_switches(browser, served):
     assert page.evaluate("() => document.querySelector('img.leaflet-image-layer').naturalWidth") > 0
     assert page.evaluate("() => window.dashboardPreloaded") == 9
     label = page.locator("#hour-label").inner_text()
-    assert "12:00–13:00 UTC" in label and ("EDT" in label or "ET" in label)
+    assert label == "Mon, Sep 14 · 8:00 AM–9:00 AM EDT", label
 
     slider = page.locator("#slider")
     slider.focus()
     page.keyboard.press("Home")
     assert _overlay_src(page).endswith("pm25_2026-09-14T10.png")
-    assert "10:00–11:00 UTC" in page.locator("#hour-label").inner_text()
+    assert page.locator("#hour-label").inner_text() == "Mon, Sep 14 · 6:00 AM–7:00 AM EDT"
 
     toggle = page.locator(".kind button").all_inner_texts()
     assert toggle == ["Estimate", "Difference", "Uncertainty"]
@@ -164,11 +196,11 @@ def test_frames_load_the_slider_moves_and_the_toggle_switches(browser, served):
     assert page.locator("#kind-diff").get_attribute("aria-pressed") == "false"
     assert _overlay_src(page).endswith("sd_2026-09-14T10.png")
     alt = page.locator("img.leaflet-image-layer").get_attribute("alt")
-    assert "ncertainty" in alt and "10:00" in alt
+    assert "ncertainty" in alt and "6:00 AM" in alt
 
     page.locator("#play").click()
     page.wait_for_function(
-        "() => document.querySelector('#hour-label').textContent.includes('11:00–12:00')",
+        "() => document.querySelector('#hour-label').textContent.includes('7:00 AM–8:00 AM')",
         timeout=3_000,
     )
     page.locator("#play").click()
@@ -215,7 +247,9 @@ def test_legend_freshness_and_stale_banner(browser, served):
     page, _ = _open(browser, served)
     legend = page.locator("#legend").inner_text()
     assert "PM2.5 (µg/m³)" in legend and "10 µg/m³" in legend
-    assert page.locator("#freshness").inner_text().startswith("Latest hour 12:00 UTC, updated ")
+    freshness = page.locator("#freshness").inner_text()
+    assert freshness.startswith("Latest hour 8:00 AM EDT, updated "), freshness
+    assert re.fullmatch(r"Latest hour .*, updated \d{1,2}:\d{2} [AP]M E[DS]T", freshness), freshness
     # the fixture's latest hour is weeks before any real clock
     banner = page.locator("#stale")
     assert banner.is_visible() and "hours old" in banner.inner_text()
@@ -278,4 +312,67 @@ def test_caption_explains_the_hour_and_legend_marks_clipping(browser, served, si
     high = latest["surface_max"] - latest["surface_mean"] > manifest["scales"]["diff"]["max"]
     assert page.locator("#legend-under").is_visible() == low
     assert page.locator("#legend-over").is_visible() == high
+    page.close()
+
+
+_BOXES = """() => [...document.querySelectorAll('.monitor-icon')].map(icon => {
+  const box = (e) => { const r = e.getBoundingClientRect();
+    return {left: r.left, right: r.right, top: r.top, bottom: r.bottom}; };
+  return {label: box(icon.querySelector('.monitor-label')),
+          triangle: box(icon.querySelector('svg'))};
+})"""
+
+
+def _overlap(a, b) -> bool:
+    return min(a["right"], b["right"]) > max(a["left"], b["left"]) and min(
+        a["bottom"], b["bottom"]
+    ) > max(a["top"], b["top"])
+
+
+def _assert_labels_clear(page):
+    boxes = page.evaluate(_BOXES)
+    assert len(boxes) >= 4, boxes
+    for i, mine in enumerate(boxes):
+        for j, other in enumerate(boxes):
+            if i == j:
+                continue
+            assert not _overlap(mine["label"], other["triangle"]), (i, j, "label over triangle")
+            if j > i:
+                assert not _overlap(mine["label"], other["label"]), (i, j, "labels overlap")
+    return boxes
+
+
+# @spec DASH-TEST-002, DASH-WEB-016
+def test_monitor_labels_on_one_spot_do_not_overlap(browser, crowded):
+    page, errors = _open(browser, crowded)
+    boxes = _assert_labels_clear(page)
+    # a monitor with nobody near it keeps its label on the right
+    lone = boxes[3]
+    assert lone["label"]["left"] >= lone["triangle"]["right"], lone
+    # the three stacked monitors take right, left, and below, in manifest order
+    first, second, third = boxes[:3]
+    assert first["label"]["left"] >= first["triangle"]["right"]
+    assert second["label"]["right"] <= second["triangle"]["left"]
+    assert third["label"]["top"] >= third["triangle"]["bottom"]
+
+    page.locator(".leaflet-control-zoom-out").click()
+    page.wait_for_timeout(400)  # Leaflet's zoom animation
+    _assert_labels_clear(page)
+    page.locator("#slider").focus()
+    page.keyboard.press("ArrowLeft")  # another hour, other label widths
+    _assert_labels_clear(page)
+    assert errors == []
+    page.close()
+
+
+# @spec DASH-TEST-002, DASH-WEB-006
+def test_hour_label_takes_the_eastern_date_and_names_both_zones_across_a_change(browser, crowded):
+    page, _ = _open(browser, crowded)
+    slider = page.locator("#slider")
+    slider.focus()
+    page.keyboard.press("Home")  # 01:00 UTC on the 15th is 9 PM Eastern on the 14th
+    assert page.locator("#hour-label").inner_text() == "Mon, Sep 14 · 9:00 PM–10:00 PM EDT"
+    page.keyboard.press("ArrowRight")  # 05:00 UTC on 1 November: 1 AM EDT, then 1 AM EST
+    assert page.locator("#hour-label").inner_text() == "Sun, Nov 1 · 1:00 AM EDT–1:00 AM EST"
+    assert "UTC" not in page.locator("body").inner_text()
     page.close()
