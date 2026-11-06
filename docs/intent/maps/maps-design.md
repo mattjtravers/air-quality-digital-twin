@@ -7,8 +7,8 @@ prefix: MAP
 
 ## Context and Design Philosophy
 
-The twin's hourly surfaces are looked at in more than one place: evaluation's report figures now,
-the static dashboard later. A surface map is only comparable to another if both use the same
+The twin's hourly surfaces are looked at in more than one place: evaluation's report figures and
+the dashboard's frames. A surface map is only comparable to another if both use the same
 colour scale, so the scale cannot be chosen per hour from the hour's own range — a clean hour
 would then look as alarming as a smoky one. Maps owns the one renderer every map figure goes
 through, with fixed colour limits set in configuration and colormaps chosen so equal steps in
@@ -16,8 +16,9 @@ concentration look like equal steps in colour.
 
 Principles:
 
-1. **One renderer.** Every map of a surface, estimate or uncertainty, is drawn by the same
-   function; a consumer chooses what to draw, not how it looks.
+1. **One renderer.** Every map of a surface, estimate or uncertainty, is coloured by the same
+   scale definition, whether drawn as a figure or as a bare image; a consumer chooses what to draw,
+   not how it looks.
 2. **Fixed scales.** Colour limits are configuration, the same for every hour. A value beyond the
    limit is clipped to the top colour and the colorbar says so; the scale never stretches to fit.
 3. **Perceptually uniform, continuous.** Sequential colormaps whose lightness rises evenly, drawn
@@ -61,6 +62,21 @@ clipping the bar ends flat.
 triangles, red-orange fill, white edge. Both carry legend entries when drawn. White-with-black and
 red-orange-with-white each keep contrast against both ends of `viridis` and `magma`.
 
+## Bare images
+
+The dashboard overlays surfaces on a basemap and draws its own legend, so it needs the colours
+without the figure.
+
+`colorize(array, *, kind, settings=None) -> ndarray` maps a 2-D array to `(height, width, 4)`
+RGBA `uint8` pixels with the kind's colormap and limits, the same scale `render_surface` uses:
+values at or below 0 take the bottom colour, values above the upper limit the top colour, and
+NaN cells are fully transparent (alpha 0). Finite cells are opaque; the consumer sets any
+overlay opacity.
+
+`colour_stops(kind, n=11, settings=None) -> list[str]` returns `n` colours evenly spaced from 0
+to the kind's upper limit as `#rrggbb` strings, so a legend drawn outside matplotlib uses the
+same colours as the pixels.
+
 ## Small multiples
 
 `small_multiples(panels, grid, *, kind, settings=None, ncols=2, width_in=6.5) -> (Figure,
@@ -98,7 +114,8 @@ bounding box's `DC_METRO` is by `AQDT_BBOX`.
 ```
 src/aqdt/maps/
   settings.py   # MapSettings, PM25_MAX, SD_MAX
-  render.py     # render_surface, add_colorbar, small_multiples, save_figure
+  render.py     # render_surface, add_colorbar, small_multiples, save_figure, colorize,
+                #   colour_stops
   surface.py    # read_surface
 tests/maps/
 ```
@@ -113,13 +130,14 @@ Dependency: `matplotlib`, in the `analysis` dependency group.
 | Uncertainty colormap | `magma` | Also perceptually uniform, and visibly different from `viridis`, so an uncertainty map is never mistaken for a concentration map. |
 | Colour limits | Fixed from settings, 0–12 µg/m³ for PM2.5 | Hours are comparable only on a common scale. 12 µg/m³ spans the clean-to-moderate range the D.C. network reports most hours and sits near the 9 µg/m³ annual standard, so ordinary hours use the full ramp. |
 | Out-of-range values | Clipped to the top colour, colorbar arrow, clipping reported | The scale stays fixed and the reader is told, rather than the scale silently stretching. |
-| Rendering library | matplotlib | The standard for publication figures in the scientific Python ecosystem; the same function renders PNGs for reports and for a static dashboard. |
+| Rendering library | matplotlib | The standard for publication figures in the scientific Python ecosystem; its colormaps colour both the report figures and the dashboard's bare images. |
+| Bare-image colouring | `colorize` and `colour_stops` beside `render_surface`, sharing its scale table | A frame with no axes still has to read on the same scale as a figure; one scale table means the two cannot diverge. |
 | Coordinates shown | EPSG:26918 kilometres | The grid's native CRS; no resampling, and distances read directly off the axes. |
 
 ## Open Questions & Future Decisions
 
-1. A basemap layer (county lines, the Potomac and Anacostia) under the surface, once the dashboard
-   needs geographic context for non-specialist readers.
+1. A basemap layer (county lines, the Potomac and Anacostia) under the surface in report figures;
+   the dashboard draws its own basemap.
 2. Whether the dashboard needs an AQI-category view beside the continuous scale.
 
 ## References

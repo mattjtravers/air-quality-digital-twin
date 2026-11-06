@@ -5,7 +5,7 @@ prefix: MAP
 
 # Maps — EARS Specs
 
-Facets: `RENDER` (drawing one surface), `SCALE` (colormaps and limits), `CLIP` (values beyond the
+Facets: `RENDER` (drawing one surface), `SCALE` (colormaps and limits, and colouring bare images), `CLIP` (values beyond the
 limits), `MARK` (sensor and monitor overlays), `MULTI` (small multiples), `READ` (reading a
 surface raster), `SAVE` (figure conventions), `CFG` (settings and tests).
 
@@ -20,6 +20,8 @@ surface raster), `SAVE` (figure conventions), `CFG` (settings and tests).
 - [x] **MAP-SCALE-001**: When `kind` is `pm25`, maps shall draw with the `viridis` colormap and continuous normalisation from 0 to `settings.pm25_max`.
 - [x] **MAP-SCALE-002**: When `kind` is `sd`, maps shall draw with the `magma` colormap and continuous normalisation from 0 to `settings.sd_max`.
 - [x] **MAP-SCALE-003**: Maps shall use the same limits for every array of a kind, whatever the array's own range.
+- [ ] **MAP-SCALE-004**: Maps shall expose `colorize(array, *, kind, settings=None)` returning a `(height, width, 4)` `uint8` RGBA array coloured with the kind's colormap and limits (MAP-SCALE-001, MAP-SCALE-002): values at or below 0 in the bottom colour, values above the upper limit in the top colour, finite cells with alpha 255, and NaN cells with alpha 0.
+- [ ] **MAP-SCALE-005**: Maps shall expose `colour_stops(kind, n=11, settings=None)` returning `n` `#rrggbb` strings, the kind's colormap sampled at `n` evenly spaced values from 0 to its upper limit inclusive, matching the colours `colorize` gives those values.
 
 ## Clipping and Colorbars
 

@@ -33,7 +33,7 @@ Two CloudFormation stacks, both deployed with AWS SAM.
 | Stack | Name | Lifetime | Holds |
 |---|---|---|---|
 | Foundation | `aqdt-foundation` | Durable; outlives every other stack | The GeoParquet archive bucket and the IAM role GitHub Actions runners assume |
-| Dispatch | `aqdt-dispatch` | Disposable; torn down and redeployed freely | Five EventBridge schedules, the dispatch Lambda, its execution role and log group |
+| Dispatch | `aqdt-dispatch` | Disposable; torn down and redeployed freely | Six EventBridge schedules, the dispatch Lambda, its execution role and log group |
 
 The archive is the system of record (HLD § Persistence). Deleting the dispatch stack must cost
 nothing, and it would not be safe to make that true if the bucket shared the stack.
@@ -90,7 +90,7 @@ rather than a change this component can make alone.
 
 ### Dispatch stack
 
-**Schedules.** Five `AWS::Scheduler::Schedule` resources, each targeting the Lambda with the
+**Schedules.** Six `AWS::Scheduler::Schedule` resources, each targeting the Lambda with the
 workflow it should dispatch:
 
 | Schedule | Expression (UTC) | Target workflow |
@@ -100,6 +100,7 @@ workflow it should dispatch:
 | `aqdt-calibrate-fit` | `cron(30 0 * * ? *)` | `calibrate-fit.yaml` |
 | `aqdt-calibrate-apply` | `cron(40 * * * ? *)` | `calibrate-apply.yaml` |
 | `aqdt-fuse` | `cron(50 * * * ? *)` | `fuse.yaml` |
+| `aqdt-dashboard` | `cron(55 * * * ? *)` | `dashboard.yaml` |
 
 EventBridge cron expressions carry six fields and a `?` in either the day-of-month or day-of-week
 position, so they do not transcribe directly from the five-field form. The cadences themselves and
@@ -126,12 +127,12 @@ invoke) turns them off. After any dispatch-stack deploy, `bin/schedules.sh statu
 they are still on, and `on` restores them.
 
 A schedule's `State` is also how scheduled runs are turned off and on for a maintenance window.
-Disabling the five schedules stops the dispatch at its source: no Lambda invocation, no workflow
+Disabling the six schedules stops the dispatch at its source: no Lambda invocation, no workflow
 run, nothing to skip. Manual `workflow_dispatch` runs are unaffected, so a backfill or a
 verification run works while the schedules are off.
 
-`bin/schedules.sh {on|off}` wraps the five `aws scheduler update-schedule` calls, because a
-switch that takes five commands to flip is a switch that gets flipped partially. `status` prints
+`bin/schedules.sh {on|off}` wraps the six `aws scheduler update-schedule` calls, because a
+switch that takes six commands to flip is a switch that gets flipped partially. `status` prints
 each schedule's current state, so the answer to "are the schedules on?" comes from AWS rather than
 from memory.
 
@@ -144,9 +145,9 @@ own: any `workflow_dispatch` they receive, they run.
 {"workflow": "ingest-purpleair.yaml"}
 ```
 
-The handler requires the `workflow` key, requires its value to be one of the five workflow file
+The handler requires the `workflow` key, requires its value to be one of the six workflow file
 names it knows, and raises otherwise. The allow-list matters because the value becomes a path
-segment in the URL the function calls; nothing but these five schedules should ever be able to
+segment in the URL the function calls; nothing but these six schedules should ever be able to
 name a workflow, and an unknown name is a misconfiguration worth failing loudly rather than
 forwarding to GitHub.
 
@@ -157,7 +158,7 @@ one that does clear means a run dispatched hours after the window it was meant f
 retries cover a transient GitHub error; beyond that the next occurrence is the retry, exactly as
 it is for a failed run.
 
-**Lambda.** One function serves all five schedules, each naming its workflow in the input.
+**Lambda.** One function serves all six schedules, each naming its workflow in the input.
 Its name is `${AWS::StackName}-dispatch` — `aqdt-dispatch-dispatch` for the `aqdt-dispatch`
 stack — and its log group (`/aws/lambda/aqdt-dispatch-dispatch`) and alarm
 (`aqdt-dispatch-dispatch-errors`) derive from the same expression. Python 3.13, handler
@@ -315,7 +316,9 @@ it:
    happily without it and then fails at every invocation.
 2. Deploy the foundation stack. It creates the bucket the archive lives in, which every run needs.
 3. Deploy the dispatch stack. Its schedules arrive `DISABLED`.
-4. Enable the schedules once a manual `workflow_dispatch` run has been seen to succeed against the
+4. Enable GitHub Pages for the repository with source "GitHub Actions"; until then the dashboard
+   workflow's deploy job fails on every run.
+5. Enable the schedules once a manual `workflow_dispatch` run has been seen to succeed against the
    archive.
 
 Any later dispatch-stack deploy ends with `bin/schedules.sh status`, and `on` if the deploy
@@ -350,7 +353,7 @@ infra/
     app/
       handler.py         # lambda_handler; no dependencies beyond the runtime
 bin/
-  schedules.sh           # on | off | status across the five schedules
+  schedules.sh           # on | off | status across the six schedules
 samconfig.toml
 tests/infrastructure/
   test_foundation_template.py
@@ -362,7 +365,7 @@ tests/infrastructure/
 
 Templates are tested as data: parsed with a PyYAML loader that passes through SAM's `!Ref`,
 `!GetAtt`, and `!Sub` short-form tags, then asserted on structure — that the bucket carries both
-retain policies, that five schedules exist with the expected expressions and
+retain policies, that six schedules exist with the expected expressions and
 `FlexibleTimeWindow: OFF`, that the Lambda's policy names exactly one secret, that the runner
 role's trust policy names this repository. No test calls AWS, so the suite runs in CI without
 credentials, as every other test in this project does. One test shells out to `sam validate` and

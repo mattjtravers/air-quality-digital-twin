@@ -1,0 +1,74 @@
+---
+design: dashboard-design
+prefix: DASH
+---
+
+# Dashboard — EARS Specs
+
+Facets: `WIN` (the window and the latest hour), `IN` (what the build reads), `GAP` (hour status),
+`FRAME` (reprojection, colouring, encoding), `MAN` (the manifest), `SITE` (the output directory
+and the build summary), `WEB` (the front end), `TEST` (how this segment is tested).
+
+## Window
+
+- [ ] **DASH-WIN-001**: The dashboard shall expose `build_site(archive_uri, out, *, hours=48, end=None, generated_at, map_settings=None) -> BuildSummary`, requiring a timezone-aware `generated_at` and a positive `hours`, and shall not read the clock.
+- [ ] **DASH-WIN-002**: When `build_site` is called without `end`, the dashboard shall take as the latest hour the latest hour whose `surface_fits` row has status `kriged`, among rows for hours before `generated_at` in the `surface_fits` partitions of the seven days up to `generated_at`. The window shall be the `hours` consecutive hours ending with the latest hour, inclusive.
+- [ ] **DASH-WIN-003**: When `build_site` is called with `end`, the dashboard shall convert `end` to UTC, truncate it to the hour, take the window `[end − hours, end)`, and take as the latest hour the latest hour in that window whose `surface_fits` row has status `kriged`.
+- [ ] **DASH-WIN-004**: If no hour in the search span (DASH-WIN-002) or the window (DASH-WIN-003) is kriged, then the dashboard shall raise an error naming the span searched, before writing anything to `out`.
+
+## Inputs
+
+- [ ] **DASH-IN-001**: The dashboard build shall read `surface_fits`, the surface rasters those rows name, AirNow observations, site records, and `calibrated_hourly` from the archive through the observation store's primitives and Maps' `read_surface`, restricted to the window's dates. It shall open no PostGIS connection and issue no request to any source API.
+
+## Hour Status
+
+- [ ] **DASH-GAP-001**: The dashboard shall give every hour in the window exactly one status: `kriged` when its fit row says `kriged` and its raster was read; `insufficient_points` or `fit_failed` when its fit row says so; `missing` when it has no fit row; and `surface_missing` when its fit row says `kriged` but its raster cannot be read.
+- [ ] **DASH-GAP-002**: When an hour's status is `surface_missing`, the dashboard shall log a warning naming the hour and the raster URI and continue the build.
+- [ ] **DASH-GAP-003**: When an hour's status is not `kriged`, the dashboard shall write no frames for it, and its manifest entry shall carry null `pm25_png`, `sd_png`, `bounds_latlon`, `surface_min`, `surface_mean`, `surface_max`, `sd_max`, and `variogram_model`.
+
+## Frames
+
+- [ ] **DASH-FRAME-001**: For each `kriged` hour, the dashboard shall reproject band 1 and the square root of band 2 (each variance clamped at 0 first) from EPSG:26918 to EPSG:3857 with `rasterio.warp.reproject` and nearest-neighbour resampling. The destination transform and size shall come from `calculate_default_transform` for the grid's bounds, and destination cells outside the source grid shall be NaN.
+- [ ] **DASH-FRAME-002**: The dashboard shall colour the reprojected estimate with Maps' `colorize(kind="pm25")` and the reprojected standard deviation with `colorize(kind="sd")`, using the build's `MapSettings`, and shall add no axes, colorbar, title, or marker to a frame.
+- [ ] **DASH-FRAME-003**: The dashboard shall encode each frame as an RGBA PNG carrying no text, time, or other metadata chunks, so that identical arrays produce identical bytes, and shall write it to `data/frames/pm25_{YYYY-MM-DDTHH}.png` or `data/frames/sd_{YYYY-MM-DDTHH}.png` for the hour's start in UTC.
+- [ ] **DASH-FRAME-004**: For each `kriged` hour, the dashboard shall set `bounds_latlon` to the frame's EPSG:3857 extent with its south-west and north-east corners converted to WGS84, written `[[south, west], [north, east]]`.
+- [ ] **DASH-FRAME-005**: For each `kriged` hour, the dashboard shall compute `surface_min`, `surface_mean`, and `surface_max` over band 1's finite cells, and `sd_max` over the standard-deviation array's finite cells, all on the source grid before reprojection.
+
+## Manifest
+
+- [ ] **DASH-MAN-001**: The dashboard shall write `data/manifest.json` validated by the Pydantic model `Manifest`, carrying `generated_at`, `latest_hour`, `window_start`, `window_end` (exclusive), `scales`, and `hours`, with every timestamp an ISO 8601 UTC string.
+- [ ] **DASH-MAN-002**: The manifest's `hours` shall hold one entry per hour of the window, ascending and contiguous, each carrying `hour`, `status`, `pm25_png`, `sd_png`, `bounds_latlon`, `surface_min`, `surface_mean`, `surface_max`, `sd_max`, `n_sensors`, `variogram_model`, `monitors`, and `sensors`. `n_sensors` and `variogram_model` shall come from the hour's fit row (`n_sensors` null when it has none), and `pm25_png` and `sd_png` shall be paths relative to the site root.
+- [ ] **DASH-MAN-003**: The manifest's `scales` shall carry, for each of `pm25` and `sd`, the upper limit `max` from `MapSettings`, the colormap name `cmap`, `units` `µg/m³`, the colorbar `label` Maps uses for the kind, and `stops`: eleven colours evenly spaced from 0 to `max`, as `#rrggbb` strings from Maps' `colour_stops`.
+- [ ] **DASH-MAN-004**: Each hour's `monitors` shall be the AirNow observations whose `observed_at` equals the hour, joined to their site records, each with `site_id`, `name`, `lat`, `lon`, `obs` (the observation's `pm25_raw`, null when absent), and `qc_flags` (its flag list). This holds for every hour, whatever its status.
+- [ ] **DASH-MAN-005**: Each hour's `sensors` shall be every `calibrated_hourly` row for the hour whose `site_id` has a site record, each with `sensor_id` (the `site_id`), `lat`, `lon`, `pm25_calibrated` (null for an `uncalibrated` row), and `fit_status`. This holds for every hour, whatever its status.
+- [ ] **DASH-MAN-006**: The dashboard shall round coordinates in the manifest to five decimal places and every other float to two, sort `monitors` by `site_id` and `sensors` by `sensor_id`, and write the JSON with sorted keys, so that two builds over the same archive state with the same arguments differ only in `generated_at`.
+
+## Site Output
+
+- [ ] **DASH-SITE-001**: The dashboard shall assemble the site in a new temporary directory beside `out` and move it into place only after every file is written, so that a build that raises leaves `out` unchanged.
+- [ ] **DASH-SITE-002**: If `out` exists, is not empty, and holds no `data/manifest.json`, then the dashboard shall raise an error naming `out` without modifying it.
+- [ ] **DASH-SITE-003**: The dashboard shall copy every file under `src/aqdt/dashboard/web/` (`index.html`, `app.js`, `style.css`) to the root of the site.
+- [ ] **DASH-SITE-004**: `BuildSummary` shall carry `window_start`, `window_end`, `latest_hour`, the count of hours by status, the number of frames written, the site's total size in bytes, and the elapsed seconds.
+- [ ] **DASH-SITE-005**: When a build's elapsed time exceeds 300 seconds or its site exceeds 50 MB (50 × 10⁶ bytes), the dashboard shall log a warning naming the target exceeded and the measured value.
+
+## Front End
+
+- [ ] **DASH-WEB-001**: The front end shall be static HTML, CSS, and JavaScript with no build step. It shall load Leaflet 1.9.4 from cdnjs with Subresource Integrity hashes on both the script and the stylesheet, and draw OpenStreetMap standard tiles with OpenStreetMap's attribution.
+- [ ] **DASH-WEB-002**: When the page loads, the front end shall fetch `data/manifest.json` bypassing the browser's HTTP cache, fit the map to the frames' `bounds_latlon`, and show the latest hour's frame as one image overlay at opacity 0.7.
+- [ ] **DASH-WEB-003**: The front end shall provide an Estimate / Uncertainty toggle of two buttons carrying `aria-pressed`, switching the overlay between each hour's `pm25_png` and `sd_png`.
+- [ ] **DASH-WEB-004**: The front end shall draw a legend for the active kind as a gradient through that scale's `stops`, labelled `0` and `max` with the scale's `label`. When the current hour's `surface_max` (Estimate) or `sd_max` (Uncertainty) exceeds `max`, it shall show an arrow at the legend's upper end with the text "values above max shown in top colour".
+- [ ] **DASH-WEB-005**: The front end shall provide a play/pause button and a range slider spanning every hour of the manifest, gap hours included. Playback shall advance one hour per 500 ms and loop to the first hour after the last.
+- [ ] **DASH-WEB-006**: The front end shall label the hour shown with its UTC span (`HH:00–HH:00 UTC`) and the same span in Eastern time computed with `Intl.DateTimeFormat` in `America/New_York`.
+- [ ] **DASH-WEB-007**: The front end shall preload the frames of every kriged hour before playback starts.
+- [ ] **DASH-WEB-008**: When the hour shown is not `kriged`, the front end shall draw no overlay and show "No surface:" followed by a plain-language reason for the hour's status.
+- [ ] **DASH-WEB-009**: The front end shall draw the shown hour's AirNow monitors as hollow triangles with no fill, labelled with `obs` to one decimal place followed by `*` when `qc_flags` is non-empty, or `n/a` when `obs` is null.
+- [ ] **DASH-WEB-010**: The front end shall draw the shown hour's PurpleAir sensors as small hollow circles with no fill. Activating one shall open a popup with its `sensor_id`, its calibrated value with units (or "no calibrated value"), and its `fit_status`.
+- [ ] **DASH-WEB-011**: The front end shall show `Latest hour HH:00 UTC, updated HH:MM UTC` from `latest_hour` and `generated_at`.
+- [ ] **DASH-WEB-012**: When the viewer's clock is more than two hours past the end of the latest hour (`now − (latest_hour + 1 h) > 2 h`), the front end shall show an amber banner stating how many hours old the latest hour is.
+- [ ] **DASH-WEB-013**: The front end shall provide a collapsible About panel stating the data sources (PurpleAir sensors with the EPA US-wide correction of Barkjohn et al. 2021, calibrated against AirNow monitors, kriged hourly), what the uncertainty map shows, that AirNow data are preliminary, and that the page is not for regulatory or health decisions, with a link to the repository.
+- [ ] **DASH-WEB-014**: Every control shall be a native button or range input operable from the keyboard with a visible focus indicator and an accessible name. The overlay image shall carry alt text naming the kind and hour shown, updated with each frame. At a viewport 360 px wide the page shall lay out in one column with no horizontal scrolling.
+
+## Testing
+
+- [ ] **DASH-TEST-001**: Dashboard tests shall build sites from a fixture archive in a temporary directory, containing at least a kriged hour, a non-kriged hour, and an hour with no fit row. They shall require no network, no AWS credentials, and no database, apart from DASH-TEST-002.
+- [ ] **DASH-TEST-002**: A smoke test shall build the site from the fixture archive, serve it over local HTTP, and load `index.html` in Playwright's Chromium. It shall assert that the frames load, that moving the slider changes the hour label and the overlay image, and that the toggle switches the overlay to the `sd` frame. It shall answer OpenStreetMap tile requests locally with a blank tile, and shall skip when Playwright or its Chromium is not installed.

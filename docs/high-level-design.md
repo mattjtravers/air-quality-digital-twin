@@ -179,10 +179,13 @@ flowchart LR
         RPT[/report directory<br/>tables + figures/]
     end
 
+    subgraph dashboard [Dashboard — hourly]
+        DSH[Dashboard<br/>static site, GitHub Pages]
+    end
+
     subgraph future [Later increments]
         TRN[Transport<br/>HRRR-driven]
         ZR[(Zarr / NetCDF<br/>gridded fields)]
-        DSH[Dashboard<br/>static HTML, GitHub Pages]
     end
 
     LAM -.->|workflow_dispatch API| SCH
@@ -190,6 +193,7 @@ flowchart LR
     SCH -.->|triggers| ANI
     SCH -.->|triggers| CAL
     SCH -.->|triggers| FUS
+    SCH -.->|triggers| DSH
     PA --> PAI --> ARC
     AN --> ANI --> ARC
     ARC -->|load| PG
@@ -197,6 +201,7 @@ flowchart LR
     ARC --> FUS --> ARC
     ARC --> EVL --> RPT
     MAP --> EVL
+    ARC --> DSH
     MAP --> DSH
     HR --> ZR --> TRN
 ```
@@ -252,10 +257,11 @@ perceptually uniform colour scales, with sensors and monitors overlaid, so every
 reads on the same scale and the dashboard draws them exactly as the evaluation figures do. It owns
 no data and no pipeline step.
 
-**Dashboard** — a later increment: a static HTML site, published on GitHub Pages, presenting the
-hourly surfaces as maps drawn by Maps, alongside the evaluation's scores. It is generated ahead of
-time from the archive and holds no state of its own, so it can be regenerated at any time like
-every other derived artifact.
+**Dashboard.** A static site, published on GitHub Pages, showing the latest hourly surface and
+an animation of the recent hours on a basemap, with the estimate and its uncertainty coloured on
+Maps' fixed scales and the monitors and sensors of each hour beside them. It is rebuilt whole
+from the archive on a schedule shortly after each fusion run, reads the archive only, and holds
+no state of its own, so it can be regenerated at any time like every other derived artifact.
 
 **Transport** — a later increment, a separate component following the same pattern: read from the
 archive, write products back to it. Named here so the store's schema is designed for it.
@@ -272,7 +278,7 @@ On a schedule, each run covers a routine window that needs no argument: PurpleAi
 snapshot at the middle of each hour; AirNow re-fetches a trailing window at least as long as the
 period the feed keeps revising; calibration refits once a day and re-applies over a trailing window
 each hour; fusion follows calibration each hour, kriging the recent hours calibration has just
-written. Because every run is idempotent and windows overlap their predecessors, a missed or
+written; the dashboard rebuilds after fusion each hour. Because every run is idempotent and windows overlap their predecessors, a missed or
 delayed AirNow or calibration run costs nothing but latency — the next run covers the gap. Any
 window can also be requested explicitly for backfill. PurpleAir is the exception: the snapshot
 endpoint has no history, so a missed PurpleAir run is a sensor-hour with no observation, which
@@ -292,7 +298,9 @@ minimal environment exists only to trigger it.
 **Scheduled runs** execute on GitHub Actions runners: a workflow per run checks out the
 repository, installs it, and invokes the pipeline entry point against the S3 archive, whether
 invoked by a scheduled dispatch or a manual `workflow_dispatch` call. Runners have no PostGIS, so
-scheduled runs write the archive only. API keys and AWS credentials are repository secrets; the
+scheduled runs write the archive only. The dashboard workflow is the one exception to the
+archive being a run's only output: it reads the archive and publishes the site it builds as a
+GitHub Pages deployment. API keys and AWS credentials are repository secrets; the
 archive URI and AWS region are repository variables.
 
 **Scheduling** is driven by AWS EventBridge Scheduler, one schedule per routine cadence, each
@@ -330,8 +338,9 @@ EARS prefix.
 | `fusion` | `FUS` | per-hour variogram fits, the kriged PM2.5 surface and its variance on a fixed grid |
 | `evaluation` | `EVAL` | scoring surfaces at held-out monitors, total uncertainty, the error budget, the evaluation report |
 | `maps` | `MAP` | the shared surface renderer, its fixed colour scales and markers |
+| `dashboard` | `DASH` | the static site build, its manifest and frames, and the front end |
 
-Later increments add `dashboard` and `transport` leaves beside these.
+A later increment adds a `transport` leaf beside these.
 
 ## Key Design Decisions
 
@@ -345,7 +354,7 @@ The trigger is separate from the executor, because GitHub Actions' own `schedule
 not dependable enough to keep the archive current — it drops most occurrences outright rather than
 running them late, leaving multi-hour gaps in the schedule. AWS EventBridge Scheduler, a managed
 cron that fires to the minute, holds one schedule per routine cadence (PurpleAir, AirNow,
-calibrate-apply, and fusion hourly, calibrate-fit daily) and invokes a
+calibrate-apply, fusion, and the dashboard rebuild hourly, calibrate-fit daily) and invokes a
 small Lambda that calls GitHub's `workflow_dispatch` REST API for the matching workflow.
 `workflow_dispatch` is the only trigger the workflows declare, so there is exactly one scheduled
 path and it is the reliable one.
@@ -504,6 +513,13 @@ support is a poor fit for time-stepped model output.
   that the uncertainty model is wrong.
 - Every error source the pipeline knows of appears in the error budget, stating whether it is
   quantified and included, quantified for diagnosis only, or listed and not modeled.
+
+**Dashboard:**
+
+- Left alone, the published page shows a latest hour no more than two hours behind the clock, and
+  says so plainly when it is.
+- A scheduled rebuild finishes in under five minutes on a GitHub Actions runner, and the site it
+  publishes is under 50 MB.
 
 **Later increments:** leave-one-out cross-validation over the sensors, reported against FAIRMODE
 model-quality objectives.

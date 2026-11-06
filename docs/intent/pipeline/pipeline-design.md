@@ -9,7 +9,7 @@ prefix: PIPE
 
 Every component of the twin exposes its run as a Python function of *(archive, window,
 settings)*: `ingest_purpleair`, `ingest_airnow`, `fit_calibrations`, `apply_calibrations`,
-`krige_surfaces`.
+`krige_surfaces`, and the dashboard's `build_site`.
 Nothing in those components knows what time it is, where it is running, or how often it should
 run — that is what keeps them pure and their archives deterministic. This component is the one
 place those questions are answered. It owns the command-line entry point through which every run
@@ -46,11 +46,18 @@ sub-command per run plus the serving-layer maintenance commands:
 | `aqdt db schema` | `apply_schema` | — |
 | `aqdt db rebuild` | `rebuild` | — |
 | `aqdt evaluate --start T --end T --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]` | `evaluate` | none: the window is required |
+| `aqdt dashboard build --out DIR [--hours N] [--end T]` | `build_site` | the `N` hours (default 48) ending at the latest kriged hour, resolved by the dashboard from the build time |
 
 `aqdt evaluate` is on demand only: it has no routine window, no workflow, and no schedule, opens no
 PostGIS connection (evaluation reads the archive and writes a report directory), and its options
 override the matching `EvaluationSettings` values. It needs the `analysis` dependency group;
 without it the command fails naming the group.
+
+`aqdt dashboard build` likewise opens no PostGIS connection and needs the `analysis` group (Maps'
+colormaps), failing naming the group without it. It passes the current time as `generated_at`;
+the dashboard resolves its own window from that and the archive (dashboard LLD § Window), because
+the window ends at the latest *kriged* hour, which only the archive knows. `--end` is truncated
+to the hour like every other bound.
 
 `now_h` is the current UTC time truncated to the hour, so the hour in progress is never
 requested: an AirNow hour is published after it ends, and a PurpleAir hour's snapshots are still
@@ -74,7 +81,8 @@ archived while it was idle.
 **Output.** Each run prints one JSON object to stdout on completion — an ingester's
 `IngestSummary`, a fit run's count of fits by status, an apply run's row count and window, a
 fuse run's window and count of surfaces by status, an evaluate run's window, report directory, and
-headline metrics — so
+headline metrics, a dashboard build's window, latest hour, hours by status, frames, site size, and
+elapsed time — so
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
 `logging` at `--log-level`, including the resolved window before the run starts. The HTTP
 client's own loggers (`httpx`, `httpcore`) stay at `WARNING` at every level: they log each
@@ -117,6 +125,7 @@ EventBridge schedule dispatched it or a person did.
 | `calibrate-fit.yaml` | daily at 00:30 | `aqdt calibrate fit` | `calibrate-fit` |
 | `calibrate-apply.yaml` | hourly at :40 | `aqdt calibrate apply` | `calibrate-apply` |
 | `fuse.yaml` | hourly at :50 | `aqdt fuse` | `fuse` |
+| `dashboard.yaml` | hourly at :55 | `aqdt dashboard build --out site` | `dashboard` |
 
 Cadence rationale: PurpleAir takes one snapshot per sensor-hour, matching the hourly step every
 consumer works at, at 24 metered requests a day; hourly aggregation imposes no minimum snapshot
@@ -127,18 +136,22 @@ hour leaves the feed time to publish the hour just ended. Fit at 00:30 runs once
 AirNow hour is archived; apply at :40 follows both ingesters each hour and, on the first hour of
 the day, the new fit; fuse at :50 follows apply, so the hour just ended is kriged from its
 calibrated values. An apply still running at :50 leaves fuse an hour without calibrated rows,
-recorded as having too few points; the next two fuse runs cover that hour again.
+recorded as having too few points; the next two fuse runs cover that hour again. The dashboard at
+:55 follows fuse, whose runs take well under a minute, so the page published each hour shows the
+hour fuse has just kriged; a fuse still running at :55 costs the page one hour of latency, made up
+at the next rebuild.
 
 The rationale above is this component's; the cadences themselves are specified once, in the
 infrastructure segment, as the cron expressions of the EventBridge schedules that realize them —
 together with the switch that turns those schedules on and off (infrastructure LLD § Dispatch
 stack). Changing a cadence is a change there, argued from the reasoning here.
 
-Each workflow runs on the `ubuntu-24.04` runner image, checks out the repository, installs
+Every job runs on the `ubuntu-24.04` runner image. Each run workflow, and the dashboard's build
+job, checks out the repository, installs
 the `uv` release pinned by `required-version` in `pyproject.toml`, sets up the Python minor
 version named in the repository's `.python-version` file, installs
 the project (`uv sync --no-dev`), and runs the command. Every job has `timeout-minutes` under its cadence interval (PurpleAir 10,
-AirNow 20, fit 30, apply 20, fuse 20) so a hung run cannot pile up behind itself. A dispatch names the ref
+AirNow 20, fit 30, apply 20, fuse 20, dashboard build 15 and deploy 10) so a hung run cannot pile up behind itself. A dispatch names the ref
 it runs from, so a workflow change takes effect when it lands on `main`.
 
 **Concurrency.** Correctness under concurrent writers is the observation store's: its partition
@@ -152,6 +165,21 @@ cancelled rather than failed. Between routine runs of one workflow that is harml
 newer run's window covers the older one's. A queued hand-started backfill is the exception: a
 scheduled run can supersede it, and its window is then not covered, so a backfill is started
 with the schedules off or checked for completion and re-dispatched if it was cancelled.
+
+**The dashboard workflow** differs from the run workflows in two ways, both following from its
+output being a published site rather than archive partitions:
+
+- It has two jobs. `build` checks out, installs with `uv sync --no-dev --group analysis`, runs
+  `aqdt dashboard build --out site`, then `actions/configure-pages` and
+  `actions/upload-pages-artifact` with `path: site`. `deploy` needs `build`, runs in the
+  `github-pages` environment, and runs `actions/deploy-pages`, whose URL it reports as the
+  environment URL.
+- Its permissions are `contents: read`, `pages: write`, and `id-token: write`. The last two are
+  what `deploy-pages` needs to publish.
+
+It maps only `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, and
+`AQDT_ARCHIVE_URI` into the build step. It reads the archive only and takes no source API key.
+GitHub Pages must be enabled with source "GitHub Actions" before the workflow can deploy.
 
 **Configuration on runners.** Credentials are repository secrets: `PURPLEAIR_API_KEY`,
 `AIRNOW_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Non-secret configuration is
@@ -185,6 +213,7 @@ src/aqdt/
   calibrate-fit.yaml
   calibrate-apply.yaml
   fuse.yaml
+  dashboard.yaml
 tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workflow files
 ```
 
@@ -192,7 +221,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 
 | Decision | Chosen | Rationale |
 |----------|--------|-----------|
-| CLI library | `argparse` (standard library) | Seven sub-commands with a handful of options; the standard library covers them with no dependency version to track. |
+| CLI library | `argparse` (standard library) | Nine sub-commands with a handful of options each; the standard library covers them with no dependency version to track. |
 | Entry point | Console script `aqdt` plus `python -m aqdt` | One name for every trigger to invoke; `-m` costs one file and helps when the script is not on `PATH`. |
 | Where the clock enters | Only in resolving a routine window in the CLI | Keeps every component a pure function of explicit bounds and puts the one clock read where it is logged and testable. |
 | Trailing window length | 48 h for AirNow and apply; 3 h for fuse | 48 h is AirNow's own revision horizon and covers a missed daily fit for apply. Fuse's cost per hour is a kriged surface, so its window is the shortest that still covers a missed run; 3 h does that twice over. None needs a record of the last run — state the pipeline deliberately keeps none of. |
@@ -201,9 +230,11 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 | PostGIS loading | Automatic when `DATABASE_URL` is set; `--no-postgis` opts out | The environment already says whether a serving layer exists; a developer's Codespace run refreshes it without remembering a flag, and runners have none to load. |
 | Trigger | AWS EventBridge Scheduler → dispatch Lambda → `workflow_dispatch`, one workflow per run | Per-run workflows keep each run's command, secrets, and concurrency group readable in one file. The HLD records why scheduling is external to GitHub Actions. |
 | Where the single-writer guarantee lives | The observation store (compare-and-swap); concurrency groups are an efficiency measure | The invariant must hold for every caller — a hand-run command, a dispatch backfill, a future orchestrator — so it is enforced where the write happens. Groups stay because two identical runs in flight waste minutes. |
+| Dashboard concurrency | Group `dashboard`, `cancel-in-progress: false`, as for every workflow | An interrupted `deploy-pages` can leave a Pages deployment unfinished, so a deployment in progress always completes. GitHub keeps one queued run per group and a newer one supersedes it, so a backlog of rebuilds collapses to the newest, which is the only site worth publishing. |
+| Dashboard cadence | Hourly at :55, after fuse at :50 | Fuse finishes in well under a minute, so five minutes later the newest surface is in the archive and the page is published within the hour it was kriged. |
 | Concurrency groups | One per workflow | A group only saves duplicated work; correctness is the store's. Sharing a group across workflows would let a queued run of one be superseded by a run of the other — a daily fit replaced by an hourly apply — and the lost run's work would not be covered. |
 | Cadence: PurpleAir hourly | Hourly at :30 | PurpleAir's API is metered per field per sensor returned, so each snapshot is a cost; one per hour is what the hourly calibration, fusion, and transport steps consume. Mid-hour is the best single-sample estimate of the hourly mean and keeps a late run inside its hour. A missed run leaves that sensor-hour empty, which downstream stages treat as any other gap. |
-| Runner installation | `uv sync --no-dev` | Runs need no test tooling. |
+| Runner installation | `uv sync --no-dev`; the dashboard adds `--group analysis` | Runs need no test tooling. The dashboard colours frames with Maps' matplotlib colormaps, which live in the `analysis` group. |
 | Runner image | `ubuntu-24.04`, named explicitly | A floating `ubuntu-latest` changes operating system under a running pipeline on GitHub's schedule, not this project's; naming the image makes a change of OS a deliberate edit that is tested before it reaches the schedules. |
 | Python interpreter | The minor version in `.python-version` (`3.12`), read by `actions/setup-python` in every workflow and by `uv` in the Codespace | `requires-python` is a floor for users of the package, not a choice of interpreter; resolving it against whatever a runner image ships puts a new Python under the pipeline on GitHub's schedule, before its compiled dependencies publish wheels for it. One file makes the interpreter a deliberate edit, shared by the Codespace and every workflow. |
 | uv release | One exact release, `[tool.uv] required-version` in `pyproject.toml`, read by `astral-sh/setup-uv` in every workflow and matched by the devcontainer's uv feature | The installer resolves and writes the lockfile, so a new uv release changes resolution and lockfile format under the pipeline. uv enforces `required-version` itself, so a Codespace on any other release fails loudly instead of resolving differently from CI. One line makes upgrading uv a deliberate edit. |
@@ -233,6 +264,7 @@ tests/pipeline/          # window resolution, CLI dispatch (runs mocked), workfl
 - `docs/intent/calibration/calibration-design.md` § Runs — daily refit cadence; both runs write
   `sensor_hourly`.
 - `docs/intent/fusion/fusion-design.md` § Runs — `krige_surfaces`, one surface per hour.
+- `docs/intent/dashboard/dashboard-design.md` — `build_site`, its window, and the site it writes.
 - `docs/intent/observation-store/observation-store-design.md` — single writer per partition;
   `load_partitions`, `rebuild`, `DATABASE_URL`, `AQDT_ARCHIVE_URI`.
 - `docs/intent/infrastructure/infrastructure-design.md` — the EventBridge schedules that render
