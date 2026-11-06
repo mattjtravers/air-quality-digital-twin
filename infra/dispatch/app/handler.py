@@ -34,6 +34,7 @@ ALLOWED_WORKFLOWS = frozenset(
         "calibrate-fit.yaml",
         "calibrate-apply.yaml",
         "fuse.yaml",
+        "dashboard.yaml",
     }
 )
 

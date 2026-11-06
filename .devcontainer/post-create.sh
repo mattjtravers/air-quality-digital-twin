@@ -1,5 +1,5 @@
 #!/bin/bash
-# @spec OBS-ENV-004
+# @spec OBS-ENV-004, DASH-TEST-003
 set -e
 
 echo "Installing C spatial dependencies..."
@@ -10,6 +10,12 @@ sudo apt-get update && sudo apt-get install -y \
 
 echo "Installing python packages via uv..."
 uv sync --all-groups
+
+# Only the dashboard's browser smoke test needs Chromium, and it skips without it, so a failed
+# install is reported rather than failing the Codespace.
+echo "Installing Playwright's Chromium and its system libraries..."
+uv run playwright install --with-deps chromium \
+    || echo "WARNING: Chromium install failed; the dashboard smoke test will be skipped."
 
 echo "Installing LID plugins for Claude..."
 claude plugin marketplace add jszmajda/lid || true

@@ -55,6 +55,19 @@ class EvaluationResult:
     headline: dict = field(default_factory=lambda: {"n": 3, "bias": 0.5})
 
 
+@dataclass
+class DashboardResult:
+    """Stands in for the dashboard's ``BuildSummary``: the attributes the CLI prints."""
+
+    window_start: datetime = datetime(2026, 9, 19, 14, tzinfo=UTC)
+    window_end: datetime = datetime(2026, 9, 21, 14, tzinfo=UTC)
+    latest_hour: datetime = datetime(2026, 9, 21, 13, tzinfo=UTC)
+    hours: dict = field(default_factory=lambda: {"kriged": 46, "missing": 2})
+    frames: int = 92
+    site_bytes: int = 1234567
+    elapsed_s: float = 12.3456
+
+
 class FakeConnection:
     def __init__(self):
         self.closed = False
@@ -105,6 +118,8 @@ def stubs(monkeypatch) -> Stubs:
     monkeypatch.setattr(cli, "krige_surfaces", s.make("krige_surfaces"), raising=False)
     s.results["evaluate"] = EvaluationResult()
     monkeypatch.setattr(cli, "evaluate", s.make("evaluate"), raising=False)
+    s.results["build_site"] = DashboardResult()
+    monkeypatch.setattr(cli, "build_site", s.make("build_site"), raising=False)
     s.connection = FakeConnection()
     monkeypatch.setattr(cli, "connect", s.make("connect"))
     s.results["connect"] = s.connection

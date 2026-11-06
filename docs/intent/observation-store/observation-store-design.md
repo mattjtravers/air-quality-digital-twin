@@ -448,7 +448,8 @@ is `DATABASE_URL` from the environment (docker-compose default in the Codespace)
 
 - Devcontainer: `docker-compose.yml` with the app container and a `postgis/postgis` service;
   `devcontainer.json` references it via `dockerComposeFile`. `postCreateCommand` runs
-  `uv sync --all-groups`, `apply_schema`, and `rebuild`.
+  `uv sync --all-groups`, `apply_schema`, and `rebuild`. The same script also installs
+  Playwright's Chromium for the dashboard's browser smoke test (`DASH-TEST-003`).
 - CI: GitHub Actions `services:` block running the same `postgis/postgis` image. Archive tests run
   against a temporary local directory; the S3 code path is exercised with `moto` (in-process S3
   mock), so CI needs no AWS credentials. Tests that need a database use `DATABASE_URL` and are

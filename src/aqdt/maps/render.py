@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, to_hex
 
 from aqdt.fusion.grid import Grid
 from aqdt.maps.settings import MapSettings
@@ -48,6 +49,11 @@ def _scale(kind: str, settings: MapSettings) -> tuple[str, float, str]:
         raise ValueError(f"kind must be one of {sorted(_SCALES)}, got {kind!r}")
     cmap, attribute, label = _SCALES[kind]
     return cmap, float(getattr(settings, attribute)), label
+
+
+def scale(kind: str, settings: MapSettings | None = None) -> tuple[str, float, str]:
+    """The kind's colormap name, upper limit, and colorbar label."""
+    return _scale(kind, settings or MapSettings())
 
 
 # @spec MAP-RENDER-001, MAP-RENDER-002, MAP-RENDER-003, MAP-SCALE-001, MAP-SCALE-002
@@ -176,6 +182,29 @@ def small_multiples(
             clipped=any(r.clipped for r in results),
         )
     return fig, results
+
+
+# @spec MAP-SCALE-004
+def colorize(array: np.ndarray, *, kind: str, settings: MapSettings | None = None) -> np.ndarray:
+    """``(height, width, 4)`` RGBA bytes on the kind's fixed scale, for an image drawn without a
+    figure: values at or below 0 take the bottom colour, values above the limit the top colour,
+    finite cells are opaque and NaN cells fully transparent."""
+    cmap, top, _ = _scale(kind, settings or MapSettings())
+    values = np.asarray(array, dtype=float)
+    finite = np.isfinite(values)
+    scaled = np.clip(np.where(finite, values, 0.0) / top, 0.0, 1.0)
+    rgba = matplotlib.colormaps[cmap](scaled, bytes=True)
+    rgba[..., 3] = np.where(finite, 255, 0)
+    return rgba
+
+
+# @spec MAP-SCALE-005
+def colour_stops(kind: str, n: int = 11, settings: MapSettings | None = None) -> list[str]:
+    """``n`` colours evenly spaced from 0 to the kind's upper limit, as ``#rrggbb``: a legend
+    drawn outside matplotlib in the same colours as ``colorize``."""
+    _, top, _ = _scale(kind, settings or MapSettings())
+    rgba = colorize(np.linspace(0.0, top, n).reshape(1, -1), kind=kind, settings=settings)[0]
+    return [to_hex(colour[:3] / 255.0) for colour in rgba]
 
 
 # @spec MAP-SAVE-001

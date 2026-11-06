@@ -8,24 +8,29 @@ An air quality digital twin for the Washington, D.C. metro: PurpleAir low-cost s
 EPA AirNow reference monitors, with NOAA HRRR transport fields in a later phase. Built
 incrementally as weekly assignments; each increment lands as a coherent, tested step.
 
-The HLD (`docs/high-level-design.md`) and nine leaf LLDs under `docs/intent/` —
+The HLD (`docs/high-level-design.md`) and ten leaf LLDs under `docs/intent/` —
 `observation-store` (`OBS`), `purpleair-ingest` (`PA`), `airnow-ingest` (`AN`), `calibration`
-(`CAL`), `fusion` (`FUS`), `evaluation` (`EVAL`), `maps` (`MAP`), `pipeline` (`PIPE`), and
-`infrastructure` (`INFRA`) — are drafted with EARS specs and tests beside each, and all nine
-segments are implemented: eight under `src/aqdt/` (`observation_store/`, `purpleair/`,
-`airnow/`, `calibration/`, `fusion/`, `evaluation/`, `maps/`, `pipeline/`, plus `registry.py`
-listing every archive product in load order) and the infrastructure as SAM templates and the
-dispatch Lambda under `infra/`, with `samconfig.toml` and `bin/schedules.sh`.
+(`CAL`), `fusion` (`FUS`), `evaluation` (`EVAL`), `maps` (`MAP`), `dashboard` (`DASH`),
+`pipeline` (`PIPE`), and `infrastructure` (`INFRA`) — are drafted with EARS specs and tests
+beside each, and all ten segments are implemented: nine under `src/aqdt/` (`observation_store/`,
+`purpleair/`, `airnow/`, `calibration/`, `fusion/`, `evaluation/`, `maps/`, `dashboard/` (with
+its static front end in `dashboard/web/`), `pipeline/`, plus `registry.py` listing every archive
+product in load order) and the infrastructure as SAM templates and the dispatch Lambda under
+`infra/`, with `samconfig.toml` and `bin/schedules.sh`.
 The `[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progress record. Read
 the HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
 schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
 Every run is invoked through the `aqdt` CLI (`aqdt ingest purpleair|airnow`, `aqdt calibrate
-fit|apply`, `aqdt fuse`, `aqdt evaluate`, `aqdt db schema|rebuild`); the five
-`.github/workflows/{ingest-*,calibrate-*,fuse}.yaml` workflows invoke it and declare
-`workflow_dispatch` as their only trigger. `aqdt evaluate` is on demand only (no workflow) and
-needs the `analysis` dependency group (`uv sync --all-groups` installs it). AWS EventBridge
-Scheduler dispatches the workflows on a schedule through a small Lambda; scheduled runs are switched on
-and off with `bin/schedules.sh on|off|status`.
+fit|apply`, `aqdt fuse`, `aqdt evaluate`, `aqdt dashboard build`, `aqdt db schema|rebuild`); the
+five run workflows `.github/workflows/{ingest-*,calibrate-*,fuse}.yaml` and the dashboard
+workflow `.github/workflows/dashboard.yaml` (which publishes the site to GitHub Pages) invoke it
+and declare `workflow_dispatch` as their only trigger. `aqdt evaluate` is on demand only (no
+workflow); it and `aqdt dashboard build` need the `analysis` dependency group (`uv sync
+--all-groups` installs it). AWS EventBridge Scheduler dispatches the workflows on a schedule
+through a small Lambda; scheduled runs are switched on and off with `bin/schedules.sh
+on|off|status`. The dashboard's browser smoke test needs Playwright's Chromium, which
+`.devcontainer/post-create.sh` installs (`uv run playwright install --with-deps chromium`); the
+test skips without it.
 
 Key architectural facts to keep in mind (rationale in the HLD):
 

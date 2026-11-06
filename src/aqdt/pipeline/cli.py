@@ -60,16 +60,32 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
+def _missing_analysis(command: str, error: ModuleNotFoundError) -> RuntimeError:
+    return RuntimeError(
+        f"aqdt {command} needs the 'analysis' dependency group ({error.name} is missing); "
+        "install it with: uv sync --group analysis"
+    )
+
+
+# @spec PIPE-CLI-017
 def evaluate(*args: Any, **kwargs: Any) -> Any:
     """``aqdt.evaluation.run.evaluate``, imported on use: it needs the ``analysis`` dependency
-    group, which scheduled runs do not install."""
+    group, which the run workflows do not install."""
     try:
         from aqdt.evaluation.run import evaluate as run
     except ModuleNotFoundError as error:
-        raise RuntimeError(
-            f"aqdt evaluate needs the 'analysis' dependency group ({error.name} is missing); "
-            "install it with: uv sync --group analysis"
-        ) from error
+        raise _missing_analysis("evaluate", error) from error
+    return run(*args, **kwargs)
+
+
+# @spec PIPE-CLI-017
+def build_site(*args: Any, **kwargs: Any) -> Any:
+    """``aqdt.dashboard.build.build_site``, imported on use: Maps' colormaps need the
+    ``analysis`` dependency group."""
+    try:
+        from aqdt.dashboard.build import build_site as run
+    except ModuleNotFoundError as error:
+        raise _missing_analysis("dashboard build", error) from error
     return run(*args, **kwargs)
 
 
@@ -121,6 +137,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--lomo-hours", type=_non_negative_int, help="leave-one-monitor-out hours (0 skips it)"
     )
     evaluate_.add_argument("--seed", type=_non_negative_int, help="random seed")
+
+    dashboard = commands.add_parser("dashboard", help="the static dashboard site")
+    dashboard_steps = dashboard.add_subparsers(dest="step", required=True)
+    dashboard_build = dashboard_steps.add_parser(
+        "build", help="rebuild the whole site from the archive"
+    )
+    dashboard_build.add_argument("--out", type=Path, required=True, help="site directory")
+    dashboard_build.add_argument(
+        "--hours", type=_positive_int, default=48, help="hours shown (default 48)"
+    )
+    dashboard_build.add_argument(
+        "--end", type=_timestamp, help="window end, exclusive (default: after the latest surface)"
+    )
 
     db = commands.add_parser("db", help="PostGIS serving layer")
     actions = db.add_subparsers(dest="action", required=True)
@@ -188,7 +217,7 @@ class _Connection:
 
 # @spec PIPE-CLI-003, PIPE-CLI-004, PIPE-CLI-005, PIPE-CLI-006, PIPE-CLI-007, PIPE-CLI-010
 # @spec PIPE-CLI-014, PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003, PIPE-OUT-006
-# @spec PIPE-CLI-015, PIPE-OUT-007
+# @spec PIPE-CLI-015, PIPE-OUT-007, PIPE-CLI-016, PIPE-OUT-008
 def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict[str, Any] | None:
     """Run the requested command and return what to print (``None`` for the db commands)."""
     if args.command == "db":
@@ -252,6 +281,21 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             "window_end": _iso(end),
             "out_dir": str(args.out),
             "headline": summary.headline,
+        }
+
+    if args.command == "dashboard":
+        end = None
+        if args.end is not None:
+            end = args.end.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        summary = build_site(archive_uri, args.out, hours=args.hours, end=end, generated_at=now)
+        return {
+            "window_start": _iso(summary.window_start),
+            "window_end": _iso(summary.window_end),
+            "latest_hour": _iso(summary.latest_hour),
+            "hours": summary.hours,
+            "frames": summary.frames,
+            "site_bytes": summary.site_bytes,
+            "elapsed_s": round(summary.elapsed_s, 1),
         }
 
     if args.command == "fuse":

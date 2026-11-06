@@ -205,8 +205,9 @@ labelled `0` and the scale's `max` with its units and label. When the current fr
 competes with the surface's colour scale.
 - AirNow monitors are hollow triangles labelled with the observed value to one decimal, followed
   by `*` when the observation carries any QC flag. A null observation is labelled `n/a`.
-- PurpleAir sensors are small hollow circles. Clicking or tapping one opens a popup with the
-  sensor ID, the calibrated value (or "no calibrated value"), and the fit status.
+- PurpleAir sensors are small hollow circles, drawn with a fully transparent fill so that the
+  whole disc, not only its outline, takes a click or tap. Clicking or tapping one opens a popup
+  with the sensor ID, the calibrated value (or "no calibrated value"), and the fit status.
 
 **Freshness.** A line under the title reads `Latest hour HH:00 UTC, updated HH:MM UTC`, from
 `latest_hour` and `generated_at`. An amber banner appears when the latest hour *ended* more than
@@ -248,7 +249,10 @@ tests/dashboard/
 `build.py` imports Maps, which needs `matplotlib` from the `analysis` dependency group, so the CLI
 imports the dashboard only when the command runs and fails naming the group when it is absent.
 The front-end smoke test drives a real browser through Playwright (the `dev` group). It skips when
-Playwright's Chromium is not installed, so CI, which installs none, skips it.
+Playwright's Chromium is not installed, so CI, which installs none, skips it. The devcontainer's
+post-create script installs Chromium and the system libraries it needs, so the smoke test runs
+in every fresh Codespace. A failed install there is reported and does not fail the Codespace's
+creation, because only this one test depends on it.
 
 ## Decisions
 

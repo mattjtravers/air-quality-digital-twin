@@ -73,6 +73,8 @@ values at or below 0 take the bottom colour, values above the upper limit the to
 NaN cells are fully transparent (alpha 0). Finite cells are opaque; the consumer sets any
 overlay opacity.
 
+`scale(kind, settings=None) -> (cmap, max, label)` names the kind's colormap, its upper limit,
+and its colorbar label, so a consumer describing the scale states it from the same table.
 `colour_stops(kind, n=11, settings=None) -> list[str]` returns `n` colours evenly spaced from 0
 to the kind's upper limit as `#rrggbb` strings, so a legend drawn outside matplotlib uses the
 same colours as the pixels.

@@ -15,6 +15,7 @@ SCHEDULES=(
     aqdt-calibrate-fit
     aqdt-calibrate-apply
     aqdt-fuse
+    aqdt-dashboard
 )
 
 usage() {

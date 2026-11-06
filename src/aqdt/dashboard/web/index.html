@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>D.C. PM2.5 twin</title>
+  <meta name="description" content="Hourly PM2.5 across the Washington, D.C. metro, kriged from calibrated PurpleAir sensors, with its uncertainty.">
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"
+        integrity="sha512-h9FcoyWjHcOcmEVkxOfTLnmZFWIH0iZhZT1H2TbOq55xssQGEJHEaIm+PgoUaZbRvQTNTluNOEfb1ZRy6D3BOw=="
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>D.C. metro PM2.5</h1>
+    <p id="freshness" class="freshness">Loading…</p>
+  </header>
+  <p id="stale" class="stale" role="status" hidden></p>
+
+  <main>
+    <div id="map" class="map" aria-label="Map of hourly PM2.5 across the D.C. metro"></div>
+
+    <section class="controls" aria-label="Map controls">
+      <div class="kind" role="group" aria-label="Map layer">
+        <button type="button" id="kind-pm25" aria-pressed="true">Estimate</button>
+        <button type="button" id="kind-sd" aria-pressed="false">Uncertainty</button>
+      </div>
+
+      <div id="legend" class="legend" aria-live="polite">
+        <span class="legend-title" id="legend-title"></span>
+        <div class="legend-row">
+          <span id="legend-min">0</span>
+          <span class="legend-bar" id="legend-bar" aria-hidden="true"></span>
+          <span id="legend-max"></span>
+        </div>
+        <span id="legend-over" class="legend-over" hidden>▲ values above max shown in top colour</span>
+      </div>
+
+      <div class="timeline">
+        <button type="button" id="play" aria-pressed="false" aria-label="Play animation">▶</button>
+        <input type="range" id="slider" min="0" max="0" value="0" step="1"
+               aria-label="Hour shown" aria-describedby="hour-label">
+      </div>
+      <p id="hour-label" class="hour-label" aria-live="polite"></p>
+      <p id="status" class="status"></p>
+
+      <p class="key">
+        <span class="key-monitor" aria-hidden="true">△</span> AirNow monitor, observed µg/m³
+        (* = QC-flagged hour)
+        <span class="key-sensor" aria-hidden="true">○</span> PurpleAir sensor (select for value)
+      </p>
+    </section>
+
+    <!-- @spec DASH-WEB-013 -->
+    <details class="about">
+      <summary>About this map</summary>
+      <p>
+        The estimate is hourly PM2.5 (fine particulate matter, µg/m³) across the Washington,
+        D.C. metro. It is built from PurpleAir low-cost sensors, corrected with the EPA US-wide
+        PurpleAir correction (Barkjohn et al. 2021) and calibrated against nearby EPA AirNow
+        reference monitors. The calibrated sensor values are then interpolated by ordinary
+        kriging, refitted every hour.
+      </p>
+      <p>
+        The uncertainty map shows the kriging standard deviation in µg/m³: how far the estimate
+        could plausibly be from the true value. It is lowest close to sensors and grows with
+        distance from them. Read the two maps together: where the uncertainty map is bright, the
+        estimate there is less certain.
+      </p>
+      <p>
+        Triangles mark AirNow reference monitors with their observed value for the hour. They are
+        not used to build the surface, so they are an independent check on it. AirNow data are
+        preliminary and unvalidated, and may be revised.
+      </p>
+      <p>
+        This is a research prototype, not for regulatory or health decisions. For official air
+        quality, see <a href="https://www.airnow.gov/">AirNow.gov</a>.
+      </p>
+      <p>
+        Source code and documentation:
+        <a href="https://github.com/mattjtravers/air-quality-digital-twin">https://github.com/mattjtravers/air-quality-digital-twin</a>.
+      </p>
+    </details>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"
+          integrity="sha512-puJW3E/qXDqYp9IfhAI54BJEaWIfloJ7JWs7OeD5i6ruC9JZL1gERT1wjtwXFlh7CjE7ZJ+/vcRZRkIYIb6p4g=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="app.js"></script>
+</body>
+</html>

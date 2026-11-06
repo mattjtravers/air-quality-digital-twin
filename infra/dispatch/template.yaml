@@ -177,6 +177,24 @@ Resources:
           MaximumRetryAttempts: 2
           MaximumEventAgeInSeconds: 300
 
+  DashboardSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aqdt-dashboard
+      Description: Hourly dashboard rebuild and Pages deploy, following fuse.
+      State: DISABLED
+      ScheduleExpression: cron(55 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DispatchFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"workflow": "dashboard.yaml"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
   # A failed dispatch produces no workflow run, so GitHub shows nothing at all. Without this the
   # archive would just quietly stop growing.
   DispatchErrorsAlarm:
@@ -208,3 +226,4 @@ Outputs:
         - !Ref CalibrateFitSchedule
         - !Ref CalibrateApplySchedule
         - !Ref FuseSchedule
+        - !Ref DashboardSchedule

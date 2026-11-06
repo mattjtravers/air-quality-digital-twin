@@ -212,3 +212,59 @@ def test_settings_defaults_environment_and_validation(monkeypatch, settings):
 # @spec MAP-CFG-003
 def test_rendering_needs_no_display():
     assert matplotlib.get_backend().lower() == "agg"
+
+
+# --- Bare images ------------------------------------------------------------------------------
+
+
+def _expected_rgba(value: float, cmap: str, top: float) -> np.ndarray:
+    colour = matplotlib.colormaps[cmap](min(max(value / top, 0.0), 1.0), bytes=True)
+    return np.asarray(colour, dtype=np.uint8)
+
+
+# @spec MAP-SCALE-004
+@pytest.mark.parametrize("kind,cmap,top", [("pm25", "viridis", PM25_MAX), ("sd", "magma", SD_MAX)])
+def test_colorize_maps_values_on_the_fixed_scale(settings, kind, cmap, top):
+    array = np.array([[-1.0, 0.0, top / 2], [top, top * 3, np.nan]], dtype=np.float32)
+    rgba = render.colorize(array, kind=kind, settings=settings)
+    assert rgba.shape == (2, 3, 4) and rgba.dtype == np.uint8
+    np.testing.assert_array_equal(rgba[0, 0], rgba[0, 1])  # at or below 0: bottom colour
+    np.testing.assert_array_equal(rgba[1, 1], rgba[1, 0])  # above the limit: top colour
+    for (row, col), value in {(0, 1): 0.0, (0, 2): top / 2, (1, 0): top}.items():
+        np.testing.assert_array_equal(rgba[row, col], _expected_rgba(value, cmap, top))
+    assert (rgba[[0, 0, 0, 1, 1], [0, 1, 2, 0, 1], 3] == 255).all()
+    assert rgba[1, 2, 3] == 0
+
+
+# @spec MAP-SCALE-004
+def test_colorize_ignores_the_arrays_own_range(settings):
+    narrow = render.colorize(np.array([[4.0, 5.0]]), kind="pm25", settings=settings)
+    wide = render.colorize(np.array([[4.0, 50.0]]), kind="pm25", settings=settings)
+    np.testing.assert_array_equal(narrow[0, 0], wide[0, 0])
+
+
+# @spec MAP-SCALE-004
+def test_colorize_follows_the_settings(monkeypatch):
+    monkeypatch.setenv("AQDT_MAP_PM25_MAX", "24")
+    rgba = render.colorize(np.array([[12.0]]), kind="pm25", settings=MapSettings())
+    np.testing.assert_array_equal(rgba[0, 0], _expected_rgba(12.0, "viridis", 24.0))
+
+
+# @spec MAP-SCALE-005
+@pytest.mark.parametrize("kind,top", [("pm25", PM25_MAX), ("sd", SD_MAX)])
+def test_colour_stops_match_colorize(settings, kind, top):
+    stops = render.colour_stops(kind, 11, settings=settings)
+    assert len(stops) == 11
+    values = np.linspace(0.0, top, 11).reshape(1, -1)
+    rgba = render.colorize(values, kind=kind, settings=settings)[0]
+    for stop, colour in zip(stops, rgba):
+        assert stop == "#%02x%02x%02x" % tuple(int(c) for c in colour[:3])
+    assert render.colour_stops(kind, settings=settings) == stops  # n defaults to 11
+
+
+# @spec MAP-SCALE-005
+def test_scale_names_the_colormap_limit_and_label(settings):
+    assert render.scale("pm25", settings) == ("viridis", PM25_MAX, "PM2.5 (µg/m³)")
+    assert render.scale("sd", settings) == ("magma", SD_MAX, "Standard deviation (µg/m³)")
+    with pytest.raises(ValueError):
+        render.scale("aqi", settings)

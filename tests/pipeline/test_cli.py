@@ -16,7 +16,7 @@ from aqdt.airnow.models import AirNowSettings
 from aqdt.calibration.schemas import CalibrationFit, CalibrationSettings, FitStatus
 from aqdt.purpleair.models import PurpleAirSettings
 
-from .conftest import ARCHIVE, MIDNIGHT, NOW_H, run
+from .conftest import ARCHIVE, MIDNIGHT, NOW, NOW_H, run
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "aqdt" / "pipeline"
@@ -39,7 +39,7 @@ def test_console_script_and_module_alias():
 
 
 # @spec PIPE-CLI-002
-def test_exactly_the_eight_sub_commands(env, stubs, tmp_path):
+def test_exactly_the_nine_sub_commands(env, stubs, tmp_path):
     for argv in (
         ["ingest", "purpleair"],
         ["ingest", "airnow"],
@@ -47,6 +47,7 @@ def test_exactly_the_eight_sub_commands(env, stubs, tmp_path):
         ["calibrate", "apply"],
         ["fuse"],
         ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", str(tmp_path)],
+        ["dashboard", "build", "--out", str(tmp_path / "site")],
     ):
         assert run(argv) == 0
     for argv in (
@@ -54,6 +55,7 @@ def test_exactly_the_eight_sub_commands(env, stubs, tmp_path):
         ["calibrate", "nope"],
         ["db", "nope"],
         ["fuse", "nope"],
+        ["dashboard", "nope"],
         ["nope"],
     ):
         with pytest.raises(SystemExit) as exc:
@@ -420,3 +422,76 @@ def test_evaluate_prints_window_output_and_headline(env, stubs, capsys, tmp_path
         "out_dir": str(tmp_path),
         "headline": {"n": 3, "bias": 0.5},
     }
+
+
+# --- Dashboard ----------------------------------------------------------------
+
+
+# @spec PIPE-CLI-016
+def test_dashboard_build_dispatch(env, stubs, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    out = tmp_path / "site"
+    assert run(["dashboard", "build", "--out", str(out)]) == 0
+    call = stubs.only("build_site")
+    assert call.args[:2] == (ARCHIVE, out) or (call.args[0], Path(call.args[1])) == (ARCHIVE, out)
+    assert call.kwargs == {"hours": 48, "end": None, "generated_at": NOW}
+    assert not [c for c in stubs.calls if c.name == "connect"]
+
+    stubs.calls.clear()
+    argv = ["dashboard", "build", "--out", str(out), "--hours", "6", "--end", "2026-09-20T10:45"]
+    assert run(argv) == 0
+    call = stubs.only("build_site")
+    assert call.kwargs == {
+        "hours": 6,
+        "end": datetime(2026, 9, 20, 10, tzinfo=UTC),
+        "generated_at": NOW,
+    }
+    for bad in (
+        ["dashboard", "build"],
+        ["dashboard", "build", "--out", str(out), "--hours", "0"],
+        ["dashboard", "build", "--out", str(out), "--start", "2026-09-20T10"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            run(bad)
+        assert exc.value.code == 2
+
+
+# @spec PIPE-OUT-008
+def test_dashboard_build_prints_its_summary(env, stubs, capsys, tmp_path):
+    assert run(["dashboard", "build", "--out", str(tmp_path)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {
+        "window_start": "2026-09-19T14:00:00Z",
+        "window_end": "2026-09-21T14:00:00Z",
+        "latest_hour": "2026-09-21T13:00:00Z",
+        "hours": {"kriged": 46, "missing": 2},
+        "frames": 92,
+        "site_bytes": 1234567,
+        "elapsed_s": 12.3,
+    }
+
+
+# @spec PIPE-CLI-017
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["dashboard", "build", "--out", "SITE"],
+        ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", "SITE"],
+    ],
+)
+def test_analysis_commands_name_the_group_when_it_is_missing(
+    env, monkeypatch, capsys, tmp_path, argv
+):
+    import sys as sys_module
+
+    for name in list(sys_module.modules):
+        if name.split(".")[0] == "matplotlib" or name.startswith(
+            ("aqdt.dashboard", "aqdt.evaluation", "aqdt.maps")
+        ):
+            monkeypatch.delitem(sys_module.modules, name)
+    monkeypatch.setitem(sys_module.modules, "matplotlib", None)
+    argv = [str(tmp_path) if a == "SITE" else a for a in argv]
+    assert run(argv) != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "analysis" in captured.err and "uv sync --group analysis" in captured.err

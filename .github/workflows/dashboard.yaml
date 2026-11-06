@@ -1,0 +1,70 @@
+# @spec PIPE-SCHED-001, PIPE-SCHED-007, PIPE-SCHED-008, PIPE-SCHED-009, PIPE-SCHED-010
+# @spec PIPE-SCHED-013, PIPE-SCHED-014, PIPE-SCHED-015, PIPE-CFG-001
+# Dispatched by an AWS EventBridge schedule (infra/dispatch) five minutes after fuse, or by hand;
+# there is no other trigger. Rebuilds the whole site from the archive and publishes it to Pages.
+name: dashboard
+
+on:
+  workflow_dispatch:
+
+# A Pages deployment in progress is never interrupted; a newer queued run supersedes an older
+# queued one, so a backlog collapses to the newest rebuild.
+concurrency:
+  group: dashboard
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --no-dev --group analysis
+
+      - name: dashboard build
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          AQDT_ARCHIVE_URI: ${{ vars.AQDT_ARCHIVE_URI }}
+        run: uv run aqdt dashboard build --out site
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
