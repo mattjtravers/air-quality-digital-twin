@@ -196,6 +196,8 @@ either means the resolution or the window has outgrown the hourly schedule.
 Static HTML, CSS, and JavaScript in `src/aqdt/dashboard/web/`, with no build step and no
 framework. Leaflet 1.9.4 loads from cdnjs, pinned by version and by Subresource Integrity hash.
 The basemap is OpenStreetMap's standard tiles with the attribution their usage policy requires.
+Above the surface, Esri's World Boundaries and Places reference tiles draw place names and
+county and state lines, with Esri's attribution beside OpenStreetMap's.
 
 **Map.** On load the page fetches `data/manifest.json`, bypassing the browser cache: Pages
 serves every file with a ten-minute cache lifetime, and the manifest is the one file that changes
@@ -203,7 +205,10 @@ under the same name each hour. Frames are named by hour and never change once kr
 freely. The page then fits the map to the frames'
 `bounds_latlon`, and shows the latest hour. The current frame is one image overlay at opacity 0.85
 over the basemap: opaque enough that neighbouring colours on the scale stay distinguishable, with
-the basemap's roads and rivers still showing through.
+the basemap's roads and rivers still showing through. The names layer sits in its own pane above
+the overlay and below the monitor and sensor markers. Its names carry a light halo, so they read
+at full contrast on every colour of every scale, and the pane takes no pointer events, so a click
+or tap reaches the marker or map beneath it.
 
 **Estimate | Difference | Uncertainty.** A three-button toggle (`aria-pressed`), in that order,
 switches every frame between the `pm25`, `diff`, and `sd` images. The legend is a horizontal
@@ -308,6 +313,7 @@ creation, because only this one test depends on it.
 | Label placement | In the page, greedy over four sides of the triangle, redone on each hour and zoom | Whether two labels collide depends on the zoom and on each label's text, which only the page knows. Four fixed sides keep each label beside its own triangle, so no leader line is needed to tell which value belongs to which monitor; manifest order makes the placement the same on every load. |
 | Leaflet delivery | cdnjs, version-pinned with an SRI hash | No build step and no vendored library to update, and the integrity hash makes the pinned file the only one the browser will run. |
 | Basemap | OpenStreetMap standard tiles with attribution | Free, familiar, and openly licensed. The page's traffic is far inside the tile usage policy. |
+| Map names | Esri World Boundaries and Places tiles in a pane above the surface | Seen through the overlay, the basemap's own names are faint, and a thinner overlay to show them would let the basemap tint the surface and shrink the colour step between neighbouring values. Names drawn above the surface orient the reader without touching its colours. Esri's reference layer is transparent apart from its names and boundaries, and is served without an API key. |
 | Freshness threshold | Banner when the latest hour ended more than 2 h ago | An on-schedule page is 1–2 h behind the clock by the hour's end, so the banner marks one missed update and no false alarm. |
 | Output directory | Built in a temporary directory, then moved into place; only an empty or previously built directory is replaced | A failed build leaves the last good site intact, and a mistyped path cannot remove unrelated files. |
 | Determinism | PNGs without metadata chunks; manifest rounded, sorted, and sort-keyed | Byte-identical output for an unchanged archive makes "stateless and idempotent" testable, and keeps a Pages deployment from changing when nothing upstream has. |
@@ -334,5 +340,6 @@ creation, because only this one test depends on it.
 - `docs/intent/infrastructure/infrastructure-design.md`: the `aqdt-dashboard` schedule.
 - Leaflet 1.9.4: `L.imageOverlay`, `L.circleMarker`, `L.divIcon`.
 - OpenStreetMap Tile Usage Policy.
+- Esri World Boundaries and Places reference layer: attribution and terms of use.
 - Barkjohn, K. K., Gantt, B., and Clements, A. L. (2021). Atmospheric Measurement Techniques 14,
   4617–4637.

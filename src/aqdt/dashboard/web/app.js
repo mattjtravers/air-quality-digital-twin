@@ -2,7 +2,7 @@
 // Everything shown is precomputed by `aqdt dashboard build`; this file only chooses what to draw.
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
 // @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011, DASH-WEB-012
-// @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016
+// @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016, DASH-WEB-017
 (function () {
   "use strict";
 
@@ -301,6 +301,22 @@
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(map);
+    // place and road names above the surface (overlay pane 400) and below the markers (600),
+    // letting every click through to what lies beneath
+    const labels = map.createPane("labels");
+    labels.style.zIndex = "450";
+    labels.style.pointerEvents = "none";
+    L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/" +
+        "World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+      {
+        pane: "labels",
+        maxZoom: 19,
+        attribution:
+          'Names &copy; <a href="https://www.esri.com">Esri</a>, HERE, Garmin, ' +
+          "and the GIS user community",
+      }
+    ).addTo(map);
     sensorLayer = L.layerGroup().addTo(map);
     monitorLayer = L.layerGroup().addTo(map);
     map.on("zoomend", placeLabels); // what is close on screen changes with the zoom

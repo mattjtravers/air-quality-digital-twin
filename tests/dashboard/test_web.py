@@ -37,7 +37,7 @@ def script() -> str:
 
 
 # @spec DASH-WEB-001
-def test_leaflet_is_pinned_with_integrity_and_osm_is_attributed():
+def test_leaflet_is_pinned_with_integrity_and_osm_and_esri_are_attributed():
     page = html()
     for asset in ("leaflet.min.js", "leaflet.min.css"):
         tag = re.search(r"<[^>]*%s[^>]*>" % re.escape(LEAFLET + asset), page)
@@ -47,6 +47,9 @@ def test_leaflet_is_pinned_with_integrity_and_osm_is_attributed():
     code = script()
     assert "tile.openstreetmap.org/{z}/{x}/{y}.png" in code
     assert "openstreetmap.org/copyright" in code and "OpenStreetMap" in code
+    assert "server.arcgisonline.com/ArcGIS/rest/services/Reference/" in code
+    assert "World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}" in code
+    assert "esri.com" in code and "Esri" in code
     assert not list(WEB.glob("package*.json")), "no build step"
 
 
@@ -149,10 +152,11 @@ def crowded(site, tmp_path_factory):
 
 def _open(browser, url, *, width=1200, height=900):
     page = browser.new_page(viewport={"width": width, "height": height})
-    page.route(
-        re.compile(r"https://[a-z.]*tile\.openstreetmap\.org/.*"),
-        lambda route: route.fulfill(status=200, content_type="image/png", body=BLANK_TILE),
-    )
+    for tiles in (r"https://[a-z.]*tile\.openstreetmap\.org/.*", r"https://server\.arcgisonline\.com/.*"):
+        page.route(
+            re.compile(tiles),
+            lambda route: route.fulfill(status=200, content_type="image/png", body=BLANK_TILE),
+        )
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(url)
@@ -375,4 +379,32 @@ def test_hour_label_takes_the_eastern_date_and_names_both_zones_across_a_change(
     page.keyboard.press("ArrowRight")  # 05:00 UTC on 1 November: 1 AM EDT, then 1 AM EST
     assert page.locator("#hour-label").inner_text() == "Sun, Nov 1 · 1:00 AM EDT–1:00 AM EST"
     assert "UTC" not in page.locator("body").inner_text()
+    page.close()
+
+
+# @spec DASH-TEST-002, DASH-WEB-017
+def test_map_names_sit_above_the_surface_and_below_the_markers(browser, served):
+    page, errors = _open(browser, served)
+    panes = page.evaluate(
+        """() => Object.fromEntries(['labels', 'overlay', 'marker'].map(name => {
+          const pane = document.querySelector(`.leaflet-${name}-pane`);
+          const style = pane && getComputedStyle(pane);
+          return [name, style && {z: Number(style.zIndex), pointer: style.pointerEvents}];
+        }))"""
+    )
+    assert panes["labels"], "a pane holds the map names"
+    assert panes["overlay"]["z"] < panes["labels"]["z"] < panes["marker"]["z"], panes
+    assert panes["labels"]["pointer"] == "none", panes
+    tiles = page.locator(".leaflet-labels-pane img.leaflet-tile")
+    assert tiles.count() > 0
+    assert "World_Boundaries_and_Places" in tiles.first.get_attribute("src")
+    assert "Esri" in page.locator(".leaflet-control-attribution").inner_text()
+    # a point under the names layer still reaches the sensor marker drawn there
+    hit = page.evaluate(
+        """() => { const r = document.querySelector('path.sensor-marker').getBoundingClientRect();
+          const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          return e.closest('.leaflet-labels-pane') ? 'labels' : e.tagName; }"""
+    )
+    assert hit != "labels", hit
+    assert errors == []
     page.close()
