@@ -246,17 +246,14 @@ def test_gap_hours_monitors_and_sensors(browser, served):
     page.close()
 
 
-# @spec DASH-TEST-002, DASH-WEB-004, DASH-WEB-011, DASH-WEB-012
-def test_legend_freshness_and_stale_banner(browser, served):
+# @spec DASH-TEST-002, DASH-WEB-004, DASH-WEB-011
+def test_legend_and_freshness(browser, served):
     page, _ = _open(browser, served)
     legend = page.locator("#legend").inner_text()
     assert "PM2.5 (µg/m³)" in legend and "10 µg/m³" in legend
     freshness = page.locator("#freshness").inner_text()
     assert freshness.startswith("Latest hour 8:00 AM EDT, updated "), freshness
     assert re.fullmatch(r"Latest hour .*, updated \d{1,2}:\d{2} [AP]M E[DS]T", freshness), freshness
-    # the fixture's latest hour is weeks before any real clock
-    banner = page.locator("#stale")
-    assert banner.is_visible() and "hours old" in banner.inner_text()
     page.close()
 
 

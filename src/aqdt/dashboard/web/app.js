@@ -1,13 +1,12 @@
 // The dashboard front end: one manifest, one image overlay, and the hour's monitors and sensors.
 // Everything shown is precomputed by `aqdt dashboard build`; this file only chooses what to draw.
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
-// @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011, DASH-WEB-012
+// @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011
 // @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016, DASH-WEB-017
 (function () {
   "use strict";
 
   const FRAME_MS = 500;
-  const STALE_AFTER_MS = 2 * 3600 * 1000; // measured from the end of the latest hour
   const HOUR_MS = 3600 * 1000;
   // the current hour's extremes on each kind's scale, from the manifest's frame statistics
   const KINDS = {
@@ -277,16 +276,6 @@
     const generated = new Date(manifest.generated_at);
     el("freshness").textContent =
       `Latest hour ${easternTime(latest)}, updated ${easternTime(generated)}`;
-    const ageMs = Date.now() - (latest.getTime() + HOUR_MS);
-    const stale = el("stale");
-    if (ageMs > STALE_AFTER_MS) {
-      const hoursOld = Math.floor((Date.now() - latest.getTime()) / HOUR_MS);
-      stale.textContent =
-        `The latest hour shown is ${hoursOld} hours old: the twin may have stopped updating.`;
-      stale.hidden = false;
-    } else {
-      stale.hidden = true;
-    }
   }
 
   async function main() {

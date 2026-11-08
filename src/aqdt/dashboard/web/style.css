@@ -4,9 +4,6 @@
   --muted: #505050;
   --line: #d0d0d0;
   --accent: #1f4e8c;
-  --stale-bg: #fff3cd;
-  --stale-fg: #5c4400;
-  --stale-line: #e0a800;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--fg);
   background: var(--bg);
@@ -24,16 +21,6 @@ body {
 
 header h1 { font-size: 1.4rem; margin: 16px 0 4px; }
 .freshness { margin: 0 0 12px; color: var(--muted); }
-
-.stale {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  background: var(--stale-bg);
-  color: var(--stale-fg);
-  border: 1px solid var(--stale-line);
-  border-radius: 6px;
-  font-weight: 600;
-}
 
 .map {
   width: 100%;

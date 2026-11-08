@@ -48,7 +48,7 @@ is.
   `generated_at` and ignoring rows for hours at or after `generated_at`. The window is the `hours`
   hours ending with it, inclusive. If no hour in those seven days is kriged, the build fails
   naming the search span. A failed build deploys nothing, so the site already published stays up,
-  and its own freshness banner reports it stale.
+  and its freshness line still names the hour it shows.
 - **With `end`** (an hour boundary, exclusive, as the pipeline's windows are), the window is
   `[end − hours, end)`, and the latest hour is the latest kriged hour within it. A window with no
   kriged hour at all fails the build in the same way.
@@ -249,11 +249,9 @@ competes with the surface's colour scale.
   with the sensor ID, the calibrated value (or "no calibrated value"), and the fit status.
 
 **Freshness.** A line under the title reads `Latest hour 2:00 PM EST, updated 3:55 PM EST`,
-from `latest_hour` and `generated_at` in Eastern time, formatted as the hour label's times are. An amber banner appears when the latest hour *ended* more than
-two hours before the viewer's clock, that is when `now − (latest_hour + 1 h) > 2 h`. It reports
-how old the latest hour is. The age counts from the hour's end because the hour just kriged began
-nearly two hours before the build that publishes it. Measured from the end, a page on schedule
-reads 1–2 h old, and the banner appears once a whole update has been missed.
+from `latest_hour` and `generated_at` in Eastern time, formatted as the hour label's times are. The page raises no alert about its age: an open page
+does not reload itself, so an old latest hour usually means the page wants refreshing rather than
+that the twin has stopped. The freshness line gives the reader the hours to judge by.
 
 **About.** A collapsible panel (`<details>`) states:
 - the data sources: PurpleAir sensors, corrected with the EPA US-wide correction (Barkjohn et al.
@@ -272,7 +270,7 @@ reads 1–2 h old, and the banner appears once a whole update has been missed.
 - The overlay image carries alt text naming the kind and the hour, updated with each frame.
 - The layout is a single column at phone width (360 px), with the controls below the map and
   touch targets at least 44 px.
-- Text and the banner meet WCAG AA contrast.
+- Text meets WCAG AA contrast.
 
 ## Package Layout
 
@@ -314,7 +312,6 @@ creation, because only this one test depends on it.
 | Leaflet delivery | cdnjs, version-pinned with an SRI hash | No build step and no vendored library to update, and the integrity hash makes the pinned file the only one the browser will run. |
 | Basemap | OpenStreetMap standard tiles with attribution | Free, familiar, and openly licensed. The page's traffic is far inside the tile usage policy. |
 | Map names | Esri World Boundaries and Places tiles in a pane above the surface | Seen through the overlay, the basemap's own names are faint, and a thinner overlay to show them would let the basemap tint the surface and shrink the colour step between neighbouring values. Names drawn above the surface orient the reader without touching its colours. Esri's reference layer is transparent apart from its names and boundaries, and is served without an API key. |
-| Freshness threshold | Banner when the latest hour ended more than 2 h ago | An on-schedule page is 1–2 h behind the clock by the hour's end, so the banner marks one missed update and no false alarm. |
 | Output directory | Built in a temporary directory, then moved into place; only an empty or previously built directory is replaced | A failed build leaves the last good site intact, and a mistyped path cannot remove unrelated files. |
 | Determinism | PNGs without metadata chunks; manifest rounded, sorted, and sort-keyed | Byte-identical output for an unchanged archive makes "stateless and idempotent" testable, and keeps a Pages deployment from changing when nothing upstream has. |
 | Clock | `generated_at` passed in by the caller | Keeps the build a function of its arguments; the pipeline remains the one place the clock is read. |
