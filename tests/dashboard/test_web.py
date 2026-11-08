@@ -58,7 +58,7 @@ def test_manifest_is_fetched_past_the_http_cache():
     code = script()
     fetch = r"fetch\(\s*['\"]data/manifest\.json['\"]\s*,\s*\{[^}]*"
     assert re.search(fetch + r"cache:\s*['\"]no-cache['\"]", code)
-    assert "opacity: 0.85" in code
+    assert "opacity: 1" in code and "0.85" not in code, "frames carry their own alpha"
 
 
 # @spec DASH-WEB-005, DASH-WEB-006
@@ -81,6 +81,10 @@ def test_about_panel():
         "preliminary",
         "not for regulatory or health decisions",
         "https://github.com/mattjtravers/air-quality-digital-twin",
+        "short-scale noise or measurement error",
+        "smooths toward the hour's average",
+        "Faded",
+        "map minus observed",
     ):
         assert phrase in text, phrase
     assert "uncertainty" in text.lower() and "standard deviation" in text.lower()
@@ -145,6 +149,22 @@ def crowded(site, tmp_path_factory):
         third["lat"], third["lon"] = first["lat"], first["lon"]
     manifest["hours"][0]["hour"] = "2026-09-15T01:00:00Z"
     manifest["hours"][1]["hour"] = "2026-11-01T05:00:00Z"
+    path.write_text(json.dumps(manifest))
+    with _serve(copy) as url:
+        yield url
+
+
+@pytest.fixture(scope="module")
+def degenerate(site, tmp_path_factory):
+    """The built site with its latest hour's variogram range edited to 300 m."""
+    out, _ = site
+    copy = tmp_path_factory.mktemp("degenerate") / "site"
+    shutil.copytree(out, copy)
+    path = copy / "data" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    for hour in manifest["hours"]:
+        if hour["hour"] == manifest["latest_hour"]:
+            hour["range_km"] = 0.3
     path.write_text(json.dumps(manifest))
     with _serve(copy) as url:
         yield url
@@ -230,9 +250,17 @@ def test_gap_hours_monitors_and_sensors(browser, served):
     page.keyboard.press("Home")
     page.keyboard.press("ArrowRight")  # 11:00, M2 flagged
     labels = page.locator(".monitor-label").all_inner_texts()
-    assert any(text.endswith("*") for text in labels), labels
+    flagged = [text for text in labels if "*" in text]
+    assert len(flagged) == 1 and re.fullmatch(r"\d+\.\d\* · map \d+\.\d", flagged[0]), labels
+    checked = [text for text in labels if "(" in text]
+    assert len(checked) == 3, labels
+    for text in checked:
+        assert re.fullmatch(r"\d+\.\d · map \d+\.\d \([+−]\d+\.\d\)", text), text
+    assert any(re.fullmatch(r"\d+\.\d", text) for text in labels), "M5 is outside the grid"
     page.keyboard.press("ArrowRight")  # 12:00, M3 null
-    assert "n/a" in page.locator(".monitor-label").all_inner_texts()
+    assert any(
+        text.startswith("n/a") for text in page.locator(".monitor-label").all_inner_texts()
+    )
 
     fills = page.evaluate(
         "() => [...document.querySelectorAll('path.sensor-marker')].map(p =>"
@@ -295,7 +323,11 @@ def test_post_create_installs_chromium_without_blocking_the_codespace():
     assert sync < install
 
 
-# @spec DASH-TEST-002, DASH-WEB-015, DASH-WEB-004
+def _signed(value: float) -> str:
+    return f"{value:+.1f}".replace("-", "−")
+
+
+# @spec DASH-TEST-002, DASH-WEB-015, DASH-WEB-004, DASH-WEB-018
 def test_caption_explains_the_hour_and_legend_marks_clipping(browser, served, site):
     import json
 
@@ -304,9 +336,28 @@ def test_caption_explains_the_hour_and_legend_marks_clipping(browser, served, si
     latest = next(h for h in manifest["hours"] if h["hour"] == manifest["latest_hour"])
     page, _ = _open(browser, served)
     caption = page.locator("#status").inner_text()
-    expected_range = f"range {latest['surface_min']:.1f}–{latest['surface_max']:.1f} µg/m³"
-    assert expected_range in caption, caption
-    assert f"nugget {round(100 * latest['nugget_share'])}% of sill" in caption, caption
+    expected = (
+        f"Kriged from {latest['n_sensors']} sensors · {latest['variogram_model']} variogram · "
+        f"values {latest['surface_min']:.1f}–{latest['surface_max']:.1f} µg/m³ · "
+        f"variogram range {latest['range_km']:.1f} km · "
+        f"nugget {round(100 * latest['nugget_share'])}% of sill"
+    )
+    assert caption == expected, caption
+    check = page.locator("#monitor-check").inner_text()
+    assert check == (
+        f"Monitors: mean difference {_signed(latest['monitor_mean_difference'])} µg/m³, "
+        f"n = {latest['monitor_n']}"
+    ), check
+    assert "Faded areas: far from sensors / high uncertainty" in page.locator(
+        "#legend"
+    ).inner_text()
+    # a gap hour has no caption line for the monitors and no fade note
+    page.locator("#slider").focus()
+    page.keyboard.press("End")
+    assert page.locator("#monitor-check").inner_text() == ""
+    assert not page.locator("#legend-faded").is_visible()
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowLeft")  # back to the latest hour, 12:00
     # the legend's arrows follow the current hour's extremes against the active scale
     page.locator("#kind-diff").click()
     low = latest["surface_min"] - latest["surface_mean"] < manifest["scales"]["diff"]["min"]
@@ -404,4 +455,24 @@ def test_map_names_sit_above_the_surface_and_below_the_markers(browser, served):
     )
     assert hit != "labels", hit
     assert errors == []
+    page.close()
+
+
+PATTERN_NOTE = "Spatial pattern not detectable this hour; map ≈ hour average."
+
+
+# @spec DASH-TEST-002, DASH-WEB-019
+def test_a_sub_kilometre_range_puts_a_note_on_the_map(browser, degenerate, served):
+    page, _ = _open(browser, degenerate)
+    note = page.locator("#map-note")
+    assert note.is_visible() and note.inner_text() == PATTERN_NOTE
+    assert page.locator("#map #map-note").count() == 1, "the note sits on the map"
+    page.locator("#slider").focus()
+    page.keyboard.press("ArrowLeft")  # 11:00, range unedited
+    assert not note.is_visible()
+    page.keyboard.press("End")  # a gap hour
+    assert not note.is_visible()
+    page.close()
+    page, _ = _open(browser, served)
+    assert not page.locator("#map-note").is_visible(), "the fixture's own ranges are over 1 km"
     page.close()

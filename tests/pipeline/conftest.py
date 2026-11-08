@@ -56,6 +56,20 @@ class EvaluationResult:
 
 
 @dataclass
+class InfluenceResult:
+    """Stands in for ``InfluenceSummary``: the attributes the CLI prints."""
+
+    hour: datetime = datetime(2026, 11, 5, 22, tzinfo=UTC)
+    center: tuple = (38.8226, -76.9773)
+    radius_km: float = 5.0
+    out_dir: str = "OUT"
+    most_influential: dict = field(
+        default_factory=lambda: {"removed": "purpleair:1", "delta_centre_value": -3.2}
+    )
+    survives_every_removal: bool = False
+
+
+@dataclass
 class DashboardResult:
     """Stands in for the dashboard's ``BuildSummary``: the attributes the CLI prints."""
 
@@ -118,6 +132,8 @@ def stubs(monkeypatch) -> Stubs:
     monkeypatch.setattr(cli, "krige_surfaces", s.make("krige_surfaces"), raising=False)
     s.results["evaluate"] = EvaluationResult()
     monkeypatch.setattr(cli, "evaluate", s.make("evaluate"), raising=False)
+    s.results["sensor_influence"] = InfluenceResult()
+    monkeypatch.setattr(cli, "sensor_influence", s.make("sensor_influence"), raising=False)
     s.results["build_site"] = DashboardResult()
     monkeypatch.setattr(cli, "build_site", s.make("build_site"), raising=False)
     s.connection = FakeConnection()

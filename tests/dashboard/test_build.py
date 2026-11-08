@@ -17,13 +17,14 @@ from rasterio.transform import Affine, array_bounds
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
+from aqdt.fusion.points import hour_points
 from aqdt.fusion.products import SURFACE_FITS
 from aqdt.maps.render import colorize, colour_stops
 from aqdt.maps.settings import DIFF_MAX, PM25_MAX, SD_MAX
 from aqdt.maps.surface import read_surface
 from aqdt.observation_store.archive import read_partitioned, read_sites
 
-from ..evaluation.conftest import FLAGGED, MONITORS, NULL_VALUE
+from ..evaluation.conftest import FLAGGED, MONITORS, NULL_VALUE, OUTSIDE_MONITOR
 from .conftest import GENERATED_AT, H10, H11, H12, H13, H14, H, build
 
 PACKAGE = Path(__file__).resolve().parents[2] / "src" / "aqdt" / "dashboard"
@@ -41,10 +42,16 @@ HOUR_KEYS = {
     "sd_max",
     "n_sensors",
     "variogram_model",
+    "range_km",
+    "nugget",
+    "sill",
     "nugget_share",
+    "monitor_n",
+    "monitor_mean_difference",
     "monitors",
     "sensors",
 }
+MONITOR_KEYS = {"site_id", "name", "lat", "lon", "obs", "qc_flags", "map_value", "difference"}
 SURFACE_FIELDS = (
     "pm25_png",
     "diff_png",
@@ -55,7 +62,11 @@ SURFACE_FIELDS = (
     "surface_max",
     "sd_max",
     "variogram_model",
+    "range_km",
+    "nugget",
+    "sill",
     "nugget_share",
+    "monitor_mean_difference",
 )
 
 
@@ -85,6 +96,23 @@ def png_chunks(path: Path) -> list[bytes]:
         chunks.append(data[offset + 4 : offset + 8])
         offset += 12 + length
     return chunks
+
+
+def support_alpha(surface, fit, archive: str, hour) -> np.ndarray:
+    """The alpha DASH-FRAME-007 specifies on the source grid, computed independently of the
+    build: the standard deviation over the sill's root, floored beyond the variogram range."""
+    sd = np.sqrt(np.clip(surface.variance, 0, None)).astype(float)
+    alpha = 0.85 - 0.25 * np.minimum(sd / math.sqrt(fit.sill), 1.0)
+    points = hour_points(read_partitioned(archive, CALIBRATED_HOURLY), read_sites(archive), hour)
+    height, width = sd.shape
+    t = surface.transform
+    xs = t.c + (np.arange(width) + 0.5) * t.a
+    ys = t.f + (np.arange(height) + 0.5) * t.e
+    gx, gy = np.meshgrid(xs, ys)
+    nearest = np.min(
+        np.hypot(gx[..., None] - points.x, gy[..., None] - points.y), axis=-1
+    )
+    return np.where(nearest > max(fit.range_m, 5000.0), 0.40, alpha)
 
 
 def to_3857(array: np.ndarray, transform: Affine):
@@ -196,6 +224,9 @@ def test_every_hour_has_one_status_and_gaps_carry_no_surface(site):
         entry = hours[iso(hour)]
         for name in SURFACE_FIELDS:
             assert entry[name] is None, (hour, name)
+        assert entry["monitor_n"] == 0
+        for monitor in entry["monitors"]:
+            assert monitor["map_value"] is None and monitor["difference"] is None
         stamp = hour.strftime("%Y-%m-%dT%H")
         for kind in ("pm25", "diff", "sd"):
             assert not (out / "data" / "frames" / f"{kind}_{stamp}.png").exists()
@@ -228,21 +259,50 @@ def test_an_unreadable_raster_costs_one_hour(archive, tmp_path, monkeypatch, cap
 # --- Frames -----------------------------------------------------------------------------------
 
 
-# @spec DASH-FRAME-001, DASH-FRAME-002
-def test_frames_are_the_reprojected_surface_on_maps_scales(site, archive):
+# @spec DASH-FRAME-001, DASH-FRAME-002, DASH-FRAME-007
+def test_frames_are_the_reprojected_surface_on_maps_scales_faded_by_support(site, archive):
     out, _ = site
     hours = hours_by_time(manifest_of(out))
-    surface = read_surface(fits_by_hour(archive)[iso(H11)].surface_uri)
+    fit = fits_by_hour(archive)[iso(H11)]
+    surface = read_surface(fit.surface_uri)
     pm25, _ = to_3857(surface.pm25, surface.transform)
     mean = surface.pm25[np.isfinite(surface.pm25)].mean()
     diff, _ = to_3857(surface.pm25 - mean, surface.transform)
     sd, _ = to_3857(np.sqrt(np.clip(surface.variance, 0, None)), surface.transform)
+    alpha, _ = to_3857(support_alpha(surface, fit, archive, H11), surface.transform)
     for kind, array in (("pm25", pm25), ("diff", diff), ("sd", sd)):
         image = np.asarray(Image.open(out / hours[iso(H11)][f"{kind}_png"]).convert("RGBA"))
         assert image.shape == (*array.shape, 4), kind
-        np.testing.assert_array_equal(image, colorize(array, kind=kind), err_msg=kind)
+        expected = colorize(array, kind=kind)
+        np.testing.assert_array_equal(image[..., :3], expected[..., :3], err_msg=kind)
+        finite = np.isfinite(array)
+        np.testing.assert_array_equal(
+            image[..., 3], np.where(finite, np.round(255 * alpha), 0).astype(np.uint8), kind
+        )
         assert (image[..., 3] == 0).any(), f"{kind}: cells outside the grid are transparent"
-        assert (image[..., 3] == 255).any(), kind
+        assert image[..., 3][finite].min() >= round(255 * 0.40), f"{kind}: never below 0.40"
+
+
+# @spec DASH-FRAME-007
+def test_support_follows_sd_over_root_sill_and_floors_beyond_the_variogram_range():
+    from aqdt.dashboard.build import support_alpha
+
+    sd = np.array([[0.0, 1.0], [2.0, 3.0]])  # with sill 4: sd / √sill = 0, 0.5, 1, 1.5
+    near = np.zeros((2, 2))
+    alpha = support_alpha(sd, near, range_m=8000.0, sill=4.0)
+    np.testing.assert_allclose(alpha, [[0.85, 0.725], [0.60, 0.60]])
+    distances = np.array([[8001.0, 7999.0], [0.0, 0.0]])
+    far = support_alpha(sd, distances, range_m=8000.0, sill=4.0)
+    assert far[0, 0] == pytest.approx(0.40), "beyond the range fades to 0.40"
+    assert far[0, 1] == pytest.approx(0.725), "within the range only the uncertainty rule"
+    short = support_alpha(sd, np.array([[5001.0, 4999.0], [0.0, 0.0]]), range_m=300.0, sill=4.0)
+    assert short[0, 0] == pytest.approx(0.40) and short[0, 1] == pytest.approx(0.725), (
+        "a sub-kilometre range is measured as 5 km"
+    )
+    narrow = support_alpha(np.array([[0.75, 0.81]]), None, range_m=8000.0, sill=4.0)
+    assert np.ptp(narrow) == pytest.approx(0.25 * 0.06 / 2), "a narrow spread fades little"
+    for sill in (0.0, None, float("nan")):
+        assert np.allclose(support_alpha(sd, None, range_m=8000.0, sill=sill), 0.85), sill
 
 
 # @spec DASH-FRAME-003
@@ -312,6 +372,18 @@ def test_nugget_share_is_nugget_over_sill(site, archive):
 
     assert nugget_share(0.2, 0.0) is None and nugget_share(None, 1.0) is None
     assert nugget_share(0.25, 1.0) == 0.25
+
+
+# @spec DASH-FRAME-008
+def test_variogram_range_nugget_and_sill_come_from_the_fit(site, archive):
+    out, _ = site
+    hours = hours_by_time(manifest_of(out))
+    fits = fits_by_hour(archive)
+    for hour in (H10, H11, H12):
+        fit, entry = fits[iso(hour)], hours[iso(hour)]
+        assert entry["range_km"] == round(fit.range_m / 1000, 2)
+        assert entry["nugget"] == round(fit.nugget, 4)
+        assert entry["sill"] == round(fit.sill, 4)
 
 
 # --- Manifest ---------------------------------------------------------------------------------
@@ -399,7 +471,7 @@ def test_monitors_are_the_hours_airnow_observations(site, archive):
         monitors = hours[iso(hour)]["monitors"]
         assert [m["site_id"] for m in monitors] == sorted(MONITORS), hour
         for m in monitors:
-            assert set(m) == {"site_id", "name", "lat", "lon", "obs", "qc_flags"}
+            assert set(m) == MONITOR_KEYS
             assert m["name"] == sites.loc[m["site_id"], "name"]
             assert m["lat"] == round(MONITORS[m["site_id"]][0], 5)
     by_id = {m["site_id"]: m for m in hours[iso(FLAGGED[1])]["monitors"]}
@@ -408,6 +480,48 @@ def test_monitors_are_the_hours_airnow_observations(site, archive):
     by_id = {m["site_id"]: m for m in hours[iso(NULL_VALUE[1])]["monitors"]}
     assert by_id[NULL_VALUE[0]]["obs"] is None
     assert by_id[NULL_VALUE[0]]["qc_flags"] == ["missing_value"]
+
+
+# @spec DASH-MAN-007
+def test_monitors_carry_the_map_value_at_their_cell_and_the_difference(site, archive):
+    out, _ = site
+    hours = hours_by_time(manifest_of(out))
+    fits = fits_by_hour(archive)
+    to_utm = Transformer.from_crs(4326, 26918, always_xy=True)
+    for hour in (H10, H11, H12):
+        entry = hours[iso(hour)]
+        surface = read_surface(fits[iso(hour)].surface_uri)
+        height, width = surface.pm25.shape
+        differences = []
+        for m in entry["monitors"]:
+            lat, lon = MONITORS[m["site_id"]]
+            column, row = ~surface.transform @ to_utm.transform(lon, lat)
+            column, row = math.floor(column), math.floor(row)
+            if not (0 <= column < width and 0 <= row < height):
+                assert m["map_value"] is None and m["difference"] is None, m["site_id"]
+                continue
+            value = float(surface.pm25[row, column])
+            assert m["map_value"] == round(value, 2), (hour, m["site_id"])
+            if m["qc_flags"] or m["obs"] is None:
+                assert m["difference"] is None, (hour, m["site_id"])
+                continue
+            obs = dict(_airnow(archive, hour))[m["site_id"]]
+            assert m["difference"] == round(value - obs, 2)
+            differences.append(value - obs)
+        assert entry["monitor_n"] == len(differences)
+        assert entry["monitor_mean_difference"] == round(float(np.mean(differences)), 2)
+    by_id = {m["site_id"]: m for m in hours[iso(FLAGGED[1])]["monitors"]}
+    assert by_id[FLAGGED[0]]["map_value"] is not None and by_id[FLAGGED[0]]["difference"] is None
+    assert by_id[OUTSIDE_MONITOR]["map_value"] is None
+    assert hours[iso(H11)]["monitor_n"] == 3, "M1, M3, M4: M2 is flagged, M5 outside the grid"
+
+
+def _airnow(archive: str, hour) -> list[tuple[str, float]]:
+    from aqdt.observation_store.archive import read_observations
+    from aqdt.observation_store.schemas import Source
+
+    rows = read_observations(archive, Source.airnow, hour, hour + H)
+    return [(r.site_id, float(r.pm25_raw)) for r in rows.itertuples() if r.pm25_raw == r.pm25_raw]
 
 
 # @spec DASH-MAN-005
@@ -454,8 +568,17 @@ def test_manifest_is_rounded_sorted_and_key_sorted(site):
             p["pm25_calibrated"] for p in entry["sensors"]
         ]:
             assert value is None or _decimals(value) <= 2
-        for name in ("surface_min", "surface_mean", "surface_max", "sd_max"):
+        for value in [p.get("map_value") for p in entry["monitors"]] + [
+            p.get("difference") for p in entry["monitors"]
+        ]:
+            assert value is None or _decimals(value) <= 2
+        for name in (
+            "surface_min", "surface_mean", "surface_max", "sd_max", "range_km",
+            "monitor_mean_difference",
+        ):
             assert entry[name] is None or _decimals(entry[name]) <= 2
+        for name in ("nugget", "sill"):
+            assert entry[name] is None or _decimals(entry[name]) <= 4
         if entry["bounds_latlon"]:
             for corner in entry["bounds_latlon"]:
                 assert all(_decimals(v) <= 5 for v in corner)

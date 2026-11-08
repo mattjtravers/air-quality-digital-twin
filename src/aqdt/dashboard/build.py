@@ -17,10 +17,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pyproj import Transformer
+from scipy.spatial import cKDTree
 
 from aqdt.calibration.products import CALIBRATED_HOURLY
 from aqdt.dashboard.frames import bounds_latlon, encode_png, to_web_mercator
 from aqdt.dashboard.manifest import Hour, HourStatus, Manifest, Monitor, Scale, Scales, Sensor
+from aqdt.evaluation.matchups import cell_index
+from aqdt.fusion.grid import CRS
+from aqdt.fusion.points import HourPoints, hour_points
 from aqdt.fusion.products import SURFACE_FITS
 from aqdt.fusion.schemas import SurfaceStatus
 from aqdt.maps.render import colorize, colour_stops, scale
@@ -43,7 +48,14 @@ FRAMES = "data/frames"
 MANIFEST = "data/manifest.json"
 UNITS = "µg/m³"
 N_STOPS = 11
+#: Overlay alpha (dashboard LLD § Support): a known cell, a cell no better than the hour's mean,
+#: and a cell beyond the variogram range (at least MIN_RANGE_M) from every sensor.
+ALPHA_MAX = 0.85
+ALPHA_AT_SILL = 0.60
+ALPHA_MIN = 0.40
+MIN_RANGE_M = 5000.0
 _READ_WORKERS = 8
+_TO_UTM = Transformer.from_crs(4326, CRS, always_xy=True)
 
 
 @dataclass(frozen=True)
@@ -143,7 +155,23 @@ def _scales(settings: MapSettings) -> Scales:
     return Scales(pm25=one("pm25"), diff=one("diff"), sd=one("sd"))
 
 
-def _monitors(observations: pd.DataFrame, sites: pd.DataFrame) -> dict[datetime, list[Monitor]]:
+@dataclass(frozen=True)
+class _MonitorHour:
+    """One monitor's observation for an hour, before the hour's surface is sampled at it."""
+
+    site_id: str
+    name: str | None
+    lat: float
+    lon: float
+    x: float  # EPSG:26918
+    y: float
+    obs: float | None  # unrounded
+    qc_flags: list[str]
+
+
+def _monitors(
+    observations: pd.DataFrame, sites: pd.DataFrame
+) -> dict[datetime, list[_MonitorHour]]:
     monitor_sites = sites[sites["site_type"] == SiteType.reference_monitor.value]
     joined = pd.DataFrame(observations).merge(
         monitor_sites[["site_id", "name", "latitude", "longitude"]],
@@ -151,21 +179,62 @@ def _monitors(observations: pd.DataFrame, sites: pd.DataFrame) -> dict[datetime,
         how="inner",
         suffixes=("_obs", ""),
     )
-    out: dict[datetime, list[Monitor]] = {}
+    out: dict[datetime, list[_MonitorHour]] = {}
     for row in joined.sort_values("site_id", kind="stable").itertuples(index=False):
         hour = pd.Timestamp(row.observed_at).to_pydatetime().astimezone(UTC)
         name = None if row.name is None or pd.isna(row.name) else str(row.name)
+        x, y = _TO_UTM.transform(float(row.longitude), float(row.latitude))
+        obs = None if row.pm25_raw is None or pd.isna(row.pm25_raw) else float(row.pm25_raw)
         out.setdefault(hour, []).append(
-            Monitor(
+            _MonitorHour(
                 site_id=row.site_id,
                 name=name,
-                lat=round(float(row.latitude), 5),
-                lon=round(float(row.longitude), 5),
-                obs=_round(row.pm25_raw),
+                lat=float(row.latitude),
+                lon=float(row.longitude),
+                x=float(x),
+                y=float(y),
+                obs=obs,
                 qc_flags=[str(flag) for flag in row.qc_flags],
             )
         )
     return out
+
+
+# @spec DASH-MAN-007
+def monitor_check(
+    monitors: list[_MonitorHour], surface: SurfaceArrays | None
+) -> tuple[list[Monitor], dict]:
+    """The hour's monitors with the surface's value at each one's cell and map − observed, and
+    the hour's count and mean of those differences. Without a surface, no value is sampled."""
+    out: list[Monitor] = []
+    differences: list[float] = []
+    for m in monitors:
+        map_value = difference = None
+        if surface is not None:
+            height, width = surface.pm25.shape
+            cell = cell_index(surface.transform, width, height, m.x, m.y)
+            if cell is not None and np.isfinite(surface.pm25[cell]):
+                map_value = float(surface.pm25[cell])
+        if map_value is not None and m.obs is not None and not m.qc_flags:
+            difference = map_value - m.obs
+            differences.append(difference)
+        out.append(
+            Monitor(
+                site_id=m.site_id,
+                name=m.name,
+                lat=round(m.lat, 5),
+                lon=round(m.lon, 5),
+                obs=_round(m.obs),
+                qc_flags=m.qc_flags,
+                map_value=_round(map_value),
+                difference=_round(difference),
+            )
+        )
+    fields = {
+        "monitor_n": len(differences),
+        "monitor_mean_difference": _round(np.mean(differences)) if differences else None,
+    }
+    return out, fields
 
 
 def _sensors(calibrated: pd.DataFrame, sites: pd.DataFrame) -> dict[datetime, list[Sensor]]:
@@ -202,18 +271,65 @@ def nugget_share(nugget, sill) -> float | None:
     return round(float(nugget) / float(sill), 2)
 
 
-# @spec DASH-FRAME-001, DASH-FRAME-002, DASH-FRAME-005
-def _render_hour(site: Path, hour: datetime, surface: SurfaceArrays, settings: MapSettings) -> dict:
-    """Write the hour's three frames; return its surface fields for the manifest."""
+# @spec DASH-FRAME-007
+def support_alpha(
+    sd: np.ndarray, nearest_m: np.ndarray | None, range_m: float, sill: float | None
+) -> np.ndarray:
+    """Each cell's overlay alpha: from 0.85 at a standard deviation of 0 down to 0.60 at the
+    hour's ``√sill`` and above, and 0.40 wherever the nearest kriging point (``nearest_m``,
+    metres; ``None`` when the points are unknown) is farther than the variogram's range or
+    5 km, whichever is longer."""
+    sd = np.asarray(sd, dtype=float)
+    if sill is None or not np.isfinite(sill) or sill <= 0:
+        alpha = np.full(sd.shape, ALPHA_MAX)
+    else:
+        alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_AT_SILL) * np.minimum(sd / math.sqrt(sill), 1.0)
+    if nearest_m is not None:
+        alpha = np.where(np.asarray(nearest_m) > max(range_m, MIN_RANGE_M), ALPHA_MIN, alpha)
+    return alpha
+
+
+def _nearest_point_m(surface: SurfaceArrays, points: HourPoints) -> np.ndarray | None:
+    """Distance from each cell centre to the nearest kriging point, metres."""
+    if points.n_points == 0:
+        return None
+    height, width = surface.pm25.shape
+    t = surface.transform
+    xs = t.c + (np.arange(width) + 0.5) * t.a
+    ys = t.f + (np.arange(height) + 0.5) * t.e
+    gx, gy = np.meshgrid(xs, ys)
+    distance, _ = cKDTree(np.column_stack([points.x, points.y])).query(
+        np.column_stack([gx.ravel(), gy.ravel()])
+    )
+    return distance.reshape(height, width)
+
+
+# @spec DASH-FRAME-001, DASH-FRAME-002, DASH-FRAME-005, DASH-FRAME-007
+def _render_hour(
+    site: Path,
+    hour: datetime,
+    surface: SurfaceArrays,
+    settings: MapSettings,
+    points: HourPoints,
+    range_m: float,
+    sill: float | None,
+) -> dict:
+    """Write the hour's three frames, faded where the estimate is least supported; return its
+    surface fields for the manifest."""
     stamp = hour.strftime("%Y-%m-%dT%H")
     pm25 = _finite(surface.pm25)
     mean = pm25.mean() if pm25.size else np.nan
     sd = np.sqrt(np.clip(surface.variance, 0, None))
+    alpha, _ = to_web_mercator(
+        support_alpha(sd, _nearest_point_m(surface, points), range_m, sill), surface.transform
+    )
     fields: dict = {}
     for kind, array in (("pm25", surface.pm25), ("diff", surface.pm25 - mean), ("sd", sd)):
         mercator, transform = to_web_mercator(array, surface.transform)
+        rgba = colorize(mercator, kind=kind, settings=settings)
+        rgba[..., 3] = np.where(np.isfinite(mercator), np.round(255 * alpha), 0).astype(np.uint8)
         path = f"{FRAMES}/{kind}_{stamp}.png"
-        (site / path).write_bytes(encode_png(colorize(mercator, kind=kind, settings=settings)))
+        (site / path).write_bytes(encode_png(rgba))
         fields[f"{kind}_png"] = path
         fields["bounds_latlon"] = bounds_latlon(mercator.shape, transform)
     sds = _finite(sd)
@@ -226,6 +342,18 @@ def _render_hour(site: Path, hour: datetime, surface: SurfaceArrays, settings: M
     return fields
 
 
+# @spec DASH-FRAME-006, DASH-FRAME-008
+def _variogram_fields(fit) -> dict:
+    return {
+        "variogram_model": fit.variogram_model,
+        "range_km": _round(fit.range_m / 1000),
+        "nugget": _round(fit.nugget, 4),
+        "sill": _round(fit.sill, 4),
+        "nugget_share": nugget_share(fit.nugget, fit.sill),
+    }
+
+
+_NO_VARIOGRAM = dict.fromkeys(("variogram_model", "range_km", "nugget", "sill", "nugget_share"))
 _NO_SURFACE = {
     "pm25_png": None,
     "diff_png": None,
@@ -236,6 +364,9 @@ _NO_SURFACE = {
     "surface_max": None,
     "sd_max": None,
 }
+
+
+_NO_POINTS = HourPoints(x=np.empty(0), y=np.empty(0), z=np.empty(0), n_sensors=0, n_points=0)
 
 
 # @spec DASH-WIN-001, DASH-IN-001, DASH-GAP-001, DASH-GAP-002, DASH-GAP-003, DASH-MAN-002
@@ -284,6 +415,7 @@ def build_site(
     )
     calibrated = read_partitioned(archive_uri, CALIBRATED_HOURLY, date=dates)
     sensors = _sensors(calibrated, sites)
+    sampled: dict[datetime, SurfaceArrays] = {}
 
     window = [window_start + k * H for k in range(hours)]
     kriged = [h for h in window if h in fit_rows and fit_rows[h].status == "kriged"]
@@ -306,7 +438,12 @@ def build_site(
                 )
                 statuses[hour] = HourStatus.surface_missing
                 continue
-            surface_fields[hour] = _render_hour(staging, hour, surface, settings)
+            points = hour_points(calibrated, sites, hour) if not calibrated.empty else _NO_POINTS
+            fit = fit_rows[hour]
+            surface_fields[hour] = _render_hour(
+                staging, hour, surface, settings, points, float(fit.range_m), fit.sill
+            )
+            sampled[hour] = surface
             statuses[hour] = HourStatus.kriged
 
         entries = []
@@ -315,17 +452,17 @@ def build_site(
             status = statuses.get(hour) or (
                 HourStatus(fit.status) if fit is not None else HourStatus.missing
             )
+            kriged_hour = status == HourStatus.kriged
+            hour_monitors, check = monitor_check(monitors.get(hour, []), sampled.get(hour))
             entries.append(
                 Hour(
                     hour=_iso(hour),
                     status=status,
                     **surface_fields.get(hour, _NO_SURFACE),
+                    **(_variogram_fields(fit) if kriged_hour else _NO_VARIOGRAM),
+                    **check,
                     n_sensors=None if fit is None else int(fit.n_sensors),
-                    variogram_model=fit.variogram_model if status == HourStatus.kriged else None,
-                    nugget_share=(
-                        nugget_share(fit.nugget, fit.sill) if status == HourStatus.kriged else None
-                    ),
-                    monitors=monitors.get(hour, []),
+                    monitors=hour_monitors,
                     sensors=sensors.get(hour, []),
                 )
             )

@@ -213,6 +213,8 @@ dependencies = [
     { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "rasterio", version = "1.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "s3fs" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "shapely" },
 ]
 
@@ -246,6 +248,7 @@ requires-dist = [
     { name = "pyproj", specifier = ">=3.7.2" },
     { name = "rasterio", specifier = ">=1.4.4" },
     { name = "s3fs", specifier = ">=2026.9.0" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "shapely", specifier = ">=2.1.2" },
 ]
 

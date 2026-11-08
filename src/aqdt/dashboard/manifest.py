@@ -47,6 +47,8 @@ class Monitor(_Model):
     lon: float
     obs: float | None  # pm25_raw, µg/m³
     qc_flags: list[str]
+    map_value: float | None  # band 1 at the monitor's cell, µg/m³; null unless kriged
+    difference: float | None  # map_value − obs; null when flagged or either is null
 
 
 class Sensor(_Model):
@@ -70,7 +72,12 @@ class Hour(_Model):
     sd_max: float | None
     n_sensors: int | None
     variogram_model: str | None
+    range_km: float | None  # the variogram's range
+    nugget: float | None  # (µg/m³)²
+    sill: float | None  # partial sill + nugget, (µg/m³)²
     nugget_share: float | None = Field(ge=0)  # nugget / sill of the hour's variogram
+    monitor_n: int = Field(ge=0)  # monitors with a difference
+    monitor_mean_difference: float | None  # mean map − observed over them, µg/m³
     monitors: list[Monitor]
     sensors: list[Sensor]
 

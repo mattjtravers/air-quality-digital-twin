@@ -66,8 +66,8 @@ header h1 { font-size: 1.4rem; margin: 16px 0 4px; }
   border-radius: 2px;
 }
 .legend-arrow { font-size: 0.8rem; }
-.legend-arrow[hidden], .legend-clipped[hidden] { display: none; }
-.legend-clipped { display: block; color: var(--muted); font-size: 0.85rem; }
+.legend-arrow[hidden], .legend-clipped[hidden], .legend-faded[hidden] { display: none; }
+.legend-clipped, .legend-faded { display: block; color: var(--muted); font-size: 0.85rem; }
 
 .timeline {
   grid-column: 1 / -1;
@@ -124,3 +124,14 @@ a { color: var(--accent); overflow-wrap: anywhere; }
   .kind button { padding: 0 6px; }
   .map { height: 55vh; }
 }
+
+.map-note {
+  max-width: 220px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.map-note[hidden] { display: none; }

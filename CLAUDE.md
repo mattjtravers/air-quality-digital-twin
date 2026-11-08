@@ -21,7 +21,7 @@ The `[x]`/`[ ]`/`[D]` markers in each `*-specs.md` are the authoritative progres
 the HLD first, then the LLD for the segment being touched; the LLDs are the source of truth for
 schemas, API contracts, QC rules, and package layout (tests mirror `src/aqdt/` under `tests/`).
 Every run is invoked through the `aqdt` CLI (`aqdt ingest purpleair|airnow`, `aqdt calibrate
-fit|apply`, `aqdt fuse`, `aqdt evaluate`, `aqdt dashboard build`, `aqdt db schema|rebuild`); the
+fit|apply`, `aqdt fuse`, `aqdt evaluate [influence]`, `aqdt dashboard build`, `aqdt db schema|rebuild`); the
 five run workflows `.github/workflows/{ingest-*,calibrate-*,fuse}.yaml` and the dashboard
 workflow `.github/workflows/dashboard.yaml` (which publishes the site to GitHub Pages) invoke it
 and declare `workflow_dispatch` as their only trigger. `aqdt evaluate` is on demand only (no

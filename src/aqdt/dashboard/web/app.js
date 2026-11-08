@@ -2,11 +2,13 @@
 // Everything shown is precomputed by `aqdt dashboard build`; this file only chooses what to draw.
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
 // @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011
-// @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016, DASH-WEB-017
+// @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016, DASH-WEB-017, DASH-WEB-018, DASH-WEB-019
 (function () {
   "use strict";
 
   const FRAME_MS = 500;
+  // below this variogram range the fit found no spatial structure (dashboard LLD § Pattern note)
+  const PATTERN_RANGE_KM = 1;
   const HOUR_MS = 3600 * 1000;
   // the current hour's extremes on each kind's scale, from the manifest's frame statistics
   const KINDS = {
@@ -79,6 +81,12 @@
     return text.replace("-", "−");
   }
 
+  // one decimal, always signed: +1.2 or −2.5
+  function signed(value) {
+    const text = Math.abs(value).toFixed(1);
+    return (value < 0 && text !== "0.0" ? "−" : "+") + text;
+  }
+
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -86,7 +94,7 @@
   }
 
   const state = { manifest: null, index: 0, kind: "pm25", timer: null, preload: null };
-  let map, overlay, monitorLayer, sensorLayer;
+  let map, overlay, monitorLayer, sensorLayer, patternNote;
   let monitorMarkers = [];
   const LABEL_SIDES = ["right", "left", "below", "above"];
 
@@ -103,9 +111,14 @@
     });
   }
 
+  // observed, then the map's value at the monitor's cell, then map − observed: "7.0 · map 4.5 (−2.5)"
   function monitorLabel(monitor) {
-    if (monitor.obs === null) return "n/a";
-    return monitor.obs.toFixed(1) + (monitor.qc_flags.length ? "*" : "");
+    let text = monitor.obs === null
+      ? "n/a"
+      : monitor.obs.toFixed(1) + (monitor.qc_flags.length ? "*" : "");
+    if (monitor.map_value !== null) text += ` · map ${monitor.map_value.toFixed(1)}`;
+    if (monitor.difference !== null) text += ` (${signed(monitor.difference)})`;
+    return text;
   }
 
   function overlaps(a, b) {
@@ -164,7 +177,7 @@
       monitorMarkers.push(L.marker([monitor.lat, monitor.lon], {
         icon: triangleIcon(text),
         keyboard: false,
-        title: `${name}: ${text === "n/a" ? "no value" : text + " µg/m³"}`,
+        title: `${name}: ${monitor.obs === null ? "no value" : text + " µg/m³"}`,
         alt: `AirNow monitor ${name}`,
       }).addTo(monitorLayer));
     }
@@ -187,18 +200,26 @@
     el("legend-under").hidden = !under;
     el("legend-over").hidden = !over;
     el("legend-clipped").hidden = !(under || over);
+    el("legend-faded").hidden = hour.status !== "kriged";
   }
 
   function caption(hour) {
     const parts = [
       `Kriged from ${hour.n_sensors} sensors`,
       `${hour.variogram_model} variogram`,
-      `range ${hour.surface_min.toFixed(1)}–${hour.surface_max.toFixed(1)} µg/m³`,
+      `values ${hour.surface_min.toFixed(1)}–${hour.surface_max.toFixed(1)} µg/m³`,
     ];
+    if (hour.range_km !== null) parts.push(`variogram range ${hour.range_km.toFixed(1)} km`);
     if (hour.nugget_share !== null) {
       parts.push(`nugget ${Math.round(100 * hour.nugget_share)}% of sill`);
     }
     return parts.join(" · ");
+  }
+
+  function monitorCheck(hour) {
+    if (hour.status !== "kriged" || !hour.monitor_n) return "";
+    return `Monitors: mean difference ${signed(hour.monitor_mean_difference)} µg/m³, ` +
+      `n = ${hour.monitor_n}`;
   }
 
   function show(index) {
@@ -214,7 +235,8 @@
       const url = hour[`${state.kind}_png`];
       const alt = `${KINDS[state.kind].alt}, ${label}`;
       if (!overlay) {
-        overlay = L.imageOverlay(url, hour.bounds_latlon, { opacity: 0.85, alt, interactive: false });
+        // each frame carries its own alpha, faded where the estimate is least supported
+        overlay = L.imageOverlay(url, hour.bounds_latlon, { opacity: 1, alt, interactive: false });
         overlay.addTo(map);
       } else {
         overlay.setUrl(url);
@@ -227,6 +249,10 @@
       if (overlay && map.hasLayer(overlay)) map.removeLayer(overlay);
       el("status").textContent = `No surface: ${REASONS[hour.status] || hour.status}.`;
     }
+    el("monitor-check").textContent = monitorCheck(hour);
+    patternNote.hidden = !(
+      hour.status === "kriged" && hour.range_km !== null && hour.range_km < PATTERN_RANGE_KM
+    );
     drawLegend(hour);
     drawPoints(hour);
   }
@@ -306,6 +332,17 @@
           "and the GIS user community",
       }
     ).addTo(map);
+    const note = L.control({ position: "topright" });
+    note.onAdd = () => {
+      const div = L.DomUtil.create("div", "map-note");
+      div.id = "map-note";
+      div.setAttribute("role", "status");
+      div.textContent = "Spatial pattern not detectable this hour; map ≈ hour average.";
+      div.hidden = true;
+      return div;
+    };
+    note.addTo(map);
+    patternNote = el("map-note");
     sensorLayer = L.layerGroup().addTo(map);
     monitorLayer = L.layerGroup().addTo(map);
     map.on("zoomend", placeLabels); // what is close on screen changes with the zoom

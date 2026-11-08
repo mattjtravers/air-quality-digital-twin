@@ -47,10 +47,12 @@ def test_exactly_the_nine_sub_commands(env, stubs, tmp_path):
         ["calibrate", "apply"],
         ["fuse"],
         ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", str(tmp_path)],
+        ["evaluate", "influence", "--hour", "2026-09-20T10", "--out", str(tmp_path)],
         ["dashboard", "build", "--out", str(tmp_path / "site")],
     ):
         assert run(argv) == 0
     for argv in (
+        ["evaluate", "nope"],
         ["ingest", "nope"],
         ["calibrate", "nope"],
         ["db", "nope"],
@@ -424,6 +426,47 @@ def test_evaluate_prints_window_output_and_headline(env, stubs, capsys, tmp_path
     }
 
 
+# @spec PIPE-CLI-018
+def test_evaluate_influence_dispatch(env, stubs, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    argv = ["evaluate", "influence", "--hour", "2026-11-05T17:20-05:00", "--out", str(tmp_path)]
+    assert run(argv) == 0
+    call = stubs.only("sensor_influence")
+    archive_uri, hour, out = call.args[:3]
+    assert archive_uri == ARCHIVE and str(out) == str(tmp_path)
+    assert hour == datetime(2026, 11, 5, 22, tzinfo=UTC)
+    assert call.kwargs == {"center": None, "radius_km": 5.0}
+    assert not [c for c in stubs.calls if c.name == "connect"]
+
+    stubs.calls.clear()
+    assert run([*argv, "--center", "38.82,-76.98", "--radius-km", "3.5"]) == 0
+    assert stubs.only("sensor_influence").kwargs == {"center": (38.82, -76.98), "radius_km": 3.5}
+    for bad in (
+        ["evaluate", "influence", "--out", str(tmp_path)],
+        ["evaluate", "influence", "--hour", "2026-11-05T22"],
+        [*argv, "--center", "38.82"],
+        [*argv, "--center", "north,west"],
+        [*argv, "--radius-km", "0"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            run(bad)
+        assert exc.value.code == 2
+
+
+# @spec PIPE-OUT-009
+def test_evaluate_influence_prints_its_summary(env, stubs, capsys, tmp_path):
+    assert run(["evaluate", "influence", "--hour", "2026-11-05T22", "--out", str(tmp_path)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {
+        "hour": "2026-11-05T22:00:00Z",
+        "center": {"lat": 38.8226, "lon": -76.9773},
+        "radius_km": 5.0,
+        "out_dir": str(tmp_path),
+        "most_influential": {"removed": "purpleair:1", "delta_centre_value": -3.2},
+        "survives_every_removal": False,
+    }
+
+
 # --- Dashboard ----------------------------------------------------------------
 
 
@@ -477,6 +520,7 @@ def test_dashboard_build_prints_its_summary(env, stubs, capsys, tmp_path):
     [
         ["dashboard", "build", "--out", "SITE"],
         ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", "SITE"],
+        ["evaluate", "influence", "--hour", "2026-09-20T10", "--out", "SITE"],
     ],
 )
 def test_analysis_commands_name_the_group_when_it_is_missing(

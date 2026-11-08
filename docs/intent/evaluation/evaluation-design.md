@@ -25,8 +25,8 @@ Principles, in order of precedence when they conflict:
 
 1. **Score what is stored.** The surface scored is the raster in the archive, sampled as any
    consumer would sample it. Re-kriging happens only in the counterfactual checks (§ Leave one
-   monitor out, § Baselines), which are reported beside the stored surface's scores, never in
-   place of them.
+   monitor out, § Baselines, § Spikes, § Sensor influence at a hotspot), which are reported beside
+   the stored surface's scores, never in place of them.
 2. **Read-only.** Evaluation reads the archive and writes nothing to it. Its outputs are a report
    directory — tables, figures, a summary — regenerated on demand, not a pipeline product.
 3. **Flagged rows are reported, not hidden.** Monitor hours with QC flags are excluded from the
@@ -789,6 +789,78 @@ observations over all AirNow observations in kriged hours (the error budget's fl
 flagged matchups over all matchups. They differ because observations at monitors outside the grid
 or with no value form no matchup.
 
+## Sensor influence at a hotspot
+
+A hotspot on one hour's surface, a few kilometres across and a few µg/m³ above the hour's mean, can
+be the air near a road or the reading of one sensor. The kriged estimate near a sensor leans on it
+heavily, so one sensor that reads high for reasons of its own (siting, a failing channel, a poor
+calibration) draws a hotspot around itself. The influence check answers, for one hour and one
+place, whether the hotspot survives removing any single sensor, and gives the evidence to judge
+each sensor that holds it up. It is a separate, on-demand run from `evaluate`, over one hour; it
+reads the archive and writes its own output directory, and touches no stored surface.
+
+`sensor_influence(archive_uri, hour, out_dir, *, center=None, radius_km=5.0) -> InfluenceSummary`,
+invoked by `aqdt evaluate influence --hour T --out DIR [--center LAT,LON] [--radius-km R]`.
+
+**The hour and its points.** `hour` is converted to UTC and truncated to the hour, and must have a
+`surface_fits` row with status `kriged`. The hour's kriging sensors are rebuilt with fusion's
+`hour_sensors`, and its points with `hour_points` (co-located sensors merged), as § Matchups
+rebuilds them.
+
+**The centre.** `center` is a WGS84 `(lat, lon)`. Without one, the centre is the centre of the
+stored raster's cell with the largest estimate, the hour's peak.
+
+**Re-krige.** Every surface here is predicted on fusion's grid for the hour's `resolution_m`, with
+`select_variogram` and `predict_chunked`, as fusion would: a control on all the hour's points, and
+one surface for each kriging sensor within `radius_km` of the centre, with that sensor's
+calibrated row removed before the points are merged. Each removal refits the variogram, because
+the twin would have fitted it without the sensor; the control is compared with each removal, so the
+refit is part of what each removal changes, and the control, not the stored raster, is the
+baseline. When removing a sensor leaves fewer than fusion's `min_points` points, or no variogram is
+eligible, that row's surface values are null.
+
+**What is measured** on each surface, on the source grid:
+
+- `centre_value`: the estimate at the cell containing the centre;
+- `monitor_value`: the estimate at the cell of the nearest AirNow monitor to the centre that lies
+  inside the grid, beside that monitor's observation for the hour;
+- `hour_mean`: the mean of the finite cells;
+- `peak`: the largest estimate among cells whose centres lie within `radius_km` of the centre, and
+  `peak_above_mean = peak − hour_mean`;
+- `area_km2`: the area of those cells whose estimate exceeds `hour_mean + 2` µg/m³.
+
+A hotspot *survives* a removal when its `area_km2` stays above zero. The change of each measure is
+the removal's value minus the control's.
+
+**Evidence on each sensor in the radius**, for judging why it reads as it does:
+
+- its calibrated and corrected values for the hour, its `fit_status`, and its fit's `slope`,
+  `intercept`, `r2`, and `n_pairs` from calibration's `fits` row at its `fit_as_of`;
+- its channel agreement for the hour, from its PurpleAir observations in `[hour, hour + 1 h)`: the
+  number of snapshots, the mean of each channel, the mean `|A − B|`, the mean
+  `|A − B| / ((A + B) / 2)` over snapshots where `A + B > 0`, and the number of snapshots flagged
+  `channel_disagreement`;
+- its persistence among the highest values: over the 168 hours ending with the hour, the hours it
+  was a kriging sensor, and the share of those in which its calibrated value was at or above the
+  95th percentile of that hour's kriging sensors' values. The share is also given separately for
+  rush hours (weekdays 07:00–10:00 and 16:00–19:00 Eastern) and for every other hour. A sensor
+  high in both is high because of where it is or how it reads; one high only at rush hour is
+  seeing traffic.
+
+**Outputs**, in `out_dir`:
+
+- `influence.csv`: one row for the control (`removed` empty) and one per sensor in the radius,
+  ordered by distance from the centre, with `removed`, `distance_km`, each measure and its change,
+  `survives`, and the evidence above (empty on the control row).
+- `influence.png`: two panels on Maps' difference scale, each surface minus its own `hour_mean`,
+  cropped to the square of side `4 × radius_km` around the centre, with the sensors and monitors
+  marked: the control, and the surface without the *most influential* sensor, the one whose removal
+  changes `centre_value` the most in absolute value. With no sensor in the radius, the control
+  alone. Written at 300 dpi.
+- `influence.json`: the hour, the centre, the radius, the nearest monitor with its observation,
+  the control's measures, the most influential sensor, and whether the hotspot survives every
+  single removal. `InfluenceSummary` carries the same.
+
 ## Package Layout
 
 ```
@@ -811,6 +883,7 @@ src/aqdt/evaluation/
   diagnostics.py  # conditional bias, coverage diagnostics, pooling, per monitor, variograms, lag
   spikes.py       # spike rule, re-krige, value tiers
   anomaly.py      # common offset and within-hour anomaly
+  influence.py    # sensor influence at a hotspot: re-krige without each sensor, evidence, figure
 tests/evaluation/
 ```
 
@@ -842,6 +915,9 @@ never evaluate, so their environments do not install them.
 | Pooling and bias | Matchup-level regression on pooled share within 10 km, day fixed effects, read beside the share's distribution and the raw difference | Hourly pooled share moves with the day's weather; holding the day fixed separates the sensors' calibration route from what the day was like, and the distribution shows how much of the bias any coefficient on the share could carry. |
 | Space and time | Exact split of MSE into the hour's common offset and the within-hour anomaly, over hours with at least 5 matchups | A surface interpolated from sensors can be right about the hour's level and wrong about where it is higher or lower, or the reverse; the split says which one its skill rests on, and the hourly mean baseline anchors the anomaly floor. |
 | Shared-offset check | Estimated on odd UTC days, scored on even days, and the reverse | Scoring on matchups the estimate never used removes the reuse of the same matchups; alternating days keeps both halves spread across the window's weather. |
+| Hotspot influence | Remove one sensor at a time within a radius, refitting the variogram, against a control re-krige | A hotspot drawn by one sensor disappears when that sensor goes and one that several sensors see does not; removing them singly names the sensor responsible. Refitting is what the twin would have done without the sensor, and the control holds everything else fixed. |
+| Hotspot criterion | Cells within the radius more than 2 µg/m³ above the hour's mean | A hotspot is defined against its own hour, as the difference view shows it; 2 µg/m³ is above the scatter a clean hour's surface carries, and small enough to catch what a reader sees. |
+| Sensor evidence | Channel agreement, the calibration fit, and a week of top-5% persistence split by rush hour | Each tests one explanation for a sensor reading high: a failing channel, a poor calibration line, or where the sensor is. Rush-hour persistence alone points at traffic; persistence at every hour points at the site or the sensor. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions

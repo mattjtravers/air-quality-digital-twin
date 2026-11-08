@@ -53,6 +53,28 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _positive_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from error
+    if not value > 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return value
+
+
+# @spec PIPE-CLI-018
+def _lat_lon(text: str) -> tuple[float, float]:
+    """``LAT,LON`` in WGS84."""
+    try:
+        lat, lon = (float(part) for part in text.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"not LAT,LON: {text!r}") from error
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise argparse.ArgumentTypeError(f"not LAT,LON in WGS84: {text!r}")
+    return lat, lon
+
+
 def _non_negative_int(text: str) -> int:
     value = int(text)
     if value < 0:
@@ -75,6 +97,16 @@ def evaluate(*args: Any, **kwargs: Any) -> Any:
         from aqdt.evaluation.run import evaluate as run
     except ModuleNotFoundError as error:
         raise _missing_analysis("evaluate", error) from error
+    return run(*args, **kwargs)
+
+
+# @spec PIPE-CLI-017
+def sensor_influence(*args: Any, **kwargs: Any) -> Any:
+    """``aqdt.evaluation.influence.sensor_influence``, imported on use, as ``evaluate`` is."""
+    try:
+        from aqdt.evaluation.influence import sensor_influence as run
+    except ModuleNotFoundError as error:
+        raise _missing_analysis("evaluate influence", error) from error
     return run(*args, **kwargs)
 
 
@@ -128,15 +160,27 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_ = commands.add_parser(
         "evaluate", help="score stored surfaces against held-out monitors (on demand)"
     )
-    evaluate_.add_argument("--start", type=_timestamp, required=True, help="window start")
-    evaluate_.add_argument("--end", type=_timestamp, required=True, help="window end, exclusive")
-    evaluate_.add_argument("--out", type=Path, required=True, help="report directory")
+    evaluate_.add_argument("--start", type=_timestamp, help="window start (required)")
+    evaluate_.add_argument("--end", type=_timestamp, help="window end, exclusive (required)")
+    evaluate_.add_argument("--out", type=Path, help="report directory (required)")
     evaluate_.add_argument("--mc-hours", type=_positive_int, help="Monte Carlo hours")
     evaluate_.add_argument("--mc-draws", type=_positive_int, help="Monte Carlo draws per hour")
     evaluate_.add_argument(
         "--lomo-hours", type=_non_negative_int, help="leave-one-monitor-out hours (0 skips it)"
     )
     evaluate_.add_argument("--seed", type=_non_negative_int, help="random seed")
+    analyses = evaluate_.add_subparsers(dest="analysis")
+    influence = analyses.add_parser(
+        "influence", help="does one hour's hotspot survive removing any single sensor?"
+    )
+    influence.add_argument("--hour", type=_timestamp, required=True, help="the hour (ISO 8601)")
+    influence.add_argument("--out", type=Path, required=True, help="output directory")
+    influence.add_argument(
+        "--center", type=_lat_lon, help="hotspot centre LAT,LON (default: the hour's peak cell)"
+    )
+    influence.add_argument(
+        "--radius-km", type=_positive_float, default=5.0, help="radius in km (default 5)"
+    )
 
     dashboard = commands.add_parser("dashboard", help="the static dashboard site")
     dashboard_steps = dashboard.add_subparsers(dest="step", required=True)
@@ -158,10 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# @spec PIPE-CLI-011
+# @spec PIPE-CLI-011, PIPE-CLI-015
 def _check_window_options(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if not hasattr(args, "start"):
         return
+    if args.command == "evaluate" and args.analysis is None:
+        missing = [f"--{n}" for n in ("start", "end", "out") if getattr(args, n) is None]
+        if missing:
+            parser.error(f"aqdt evaluate requires {', '.join(missing)}")
     if (args.start is None) != (args.end is None):
         parser.error("--start and --end must be given together")
     if getattr(args, "hours", None) is not None and args.start is not None:
@@ -217,7 +265,7 @@ class _Connection:
 
 # @spec PIPE-CLI-003, PIPE-CLI-004, PIPE-CLI-005, PIPE-CLI-006, PIPE-CLI-007, PIPE-CLI-010
 # @spec PIPE-CLI-014, PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003, PIPE-OUT-006
-# @spec PIPE-CLI-015, PIPE-OUT-007, PIPE-CLI-016, PIPE-OUT-008
+# @spec PIPE-CLI-015, PIPE-OUT-007, PIPE-CLI-016, PIPE-OUT-008, PIPE-CLI-018, PIPE-OUT-009
 def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict[str, Any] | None:
     """Run the requested command and return what to print (``None`` for the db commands)."""
     if args.command == "db":
@@ -257,6 +305,21 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             "window_start": _iso(as_of - timedelta(days=settings.window_days)),
             "window_end": _iso(as_of),
             "fits": {status.value: counts.get(status, 0) for status in FitStatus},
+        }
+
+    if args.command == "evaluate" and args.analysis == "influence":
+        hour = args.hour.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        log.info("evaluate influence hour %s", _iso(hour))
+        summary = sensor_influence(
+            archive_uri, hour, args.out, center=args.center, radius_km=args.radius_km
+        )
+        return {
+            "hour": _iso(summary.hour),
+            "center": {"lat": summary.center[0], "lon": summary.center[1]},
+            "radius_km": summary.radius_km,
+            "out_dir": str(args.out),
+            "most_influential": summary.most_influential,
+            "survives_every_removal": summary.survives_every_removal,
         }
 
     if args.command == "evaluate":

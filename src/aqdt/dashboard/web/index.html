@@ -37,6 +37,7 @@
           <span id="legend-over" class="legend-arrow" hidden aria-hidden="true">▲</span>
         </div>
         <span id="legend-clipped" class="legend-clipped" hidden>values beyond the scale shown in its end colours</span>
+        <span id="legend-faded" class="legend-faded" hidden>Faded areas: far from sensors / high uncertainty</span>
       </div>
 
       <div class="timeline">
@@ -46,10 +47,11 @@
       </div>
       <p id="hour-label" class="hour-label" aria-live="polite"></p>
       <p id="status" class="status"></p>
+      <p id="monitor-check" class="status"></p>
 
       <p class="key">
-        <span class="key-monitor" aria-hidden="true">△</span> AirNow monitor, observed µg/m³
-        (* = QC-flagged hour)
+        <span class="key-monitor" aria-hidden="true">△</span> AirNow monitor: observed · map value
+        (map − observed), µg/m³ (* = QC-flagged hour)
         <span class="key-sensor" aria-hidden="true">○</span> PurpleAir sensor (select for value)
       </p>
     </section>
@@ -74,11 +76,18 @@
         The uncertainty map shows the kriging standard deviation in µg/m³: how far the estimate
         could plausibly be from the true value. It is lowest close to sensors and grows with
         distance from them. Read the two maps together: where the uncertainty map is bright, the
-        estimate there is less certain.
+        estimate there is less certain. Faded areas, on every view, are far from sensors (beyond the
+        hour's variogram range) or where the uncertainty is highest.
       </p>
       <p>
-        Triangles mark AirNow reference monitors with their observed value for the hour. They are
-        not used to build the surface, so they are an independent check on it. AirNow data are
+        The caption gives each hour's nugget share: the part of sensor-to-sensor variation the
+        variogram treats as short-scale noise or measurement error, which is typical for low-cost
+        sensors. A high share means the map smooths toward the hour's average.
+      </p>
+      <p>
+        Triangles mark AirNow reference monitors with their observed value for the hour, the map's
+        value at the monitor, and in brackets the map minus observed. Monitors are not used to
+        build the surface, so they are an independent check on it. AirNow data are
         preliminary and unvalidated, and may be revised.
       </p>
       <p>

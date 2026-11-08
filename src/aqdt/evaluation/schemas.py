@@ -32,3 +32,22 @@ class EvaluationSummary(BaseModel):
     kriged_hours: int
     days: int
     headline: dict[str, float | int | None]
+
+
+# @spec EVAL-INFL-010
+class InfluenceSummary(BaseModel):
+    """What ``sensor_influence`` returns: the hour and centre checked, the nearest monitor, the
+    control's measures, the removal that moved the centre most, and whether the hotspot survives
+    every single removal."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    hour: datetime
+    center: tuple[float, float]  # (lat, lon), WGS84
+    radius_km: float
+    out_dir: Path
+    monitor: dict[str, str | float | None]
+    control: dict[str, float | None]
+    most_influential: dict | None
+    n_removed: int
+    survives_every_removal: bool

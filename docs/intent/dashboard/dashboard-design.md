@@ -64,7 +64,8 @@ All read from the archive through the store's primitives, for the window's dates
 - The surface rasters those rows name, read with Maps' `read_surface`.
 - AirNow observations (`read_observations`, source `airnow`) and the site records
   (`read_sites`).
-- `calibrated_hourly` (calibration).
+- `calibrated_hourly` (calibration), from which the hour's kriging points are also rebuilt with
+  fusion's `hour_points`, as evaluation rebuilds them.
 
 ### Hour status
 
@@ -102,13 +103,39 @@ hour comparable in absolute terms.
    NaN. Every hour at one resolution shares one grid, so every frame of a build shares one
    destination transform and one set of bounds.
 2. **Colour** each array through Maps' `colorize` for its kind (`pm25`, `diff`, or `sd`), giving
-   RGBA pixels on the fixed scale: NaN fully transparent, values beyond a limit in that end's
-   colour.
-3. **Encode** as PNG, with no text chunks or timestamps, so identical inputs produce identical
+   RGB pixels on the fixed scale, values beyond a limit in that end's colour.
+3. **Fade** where the estimate is least supported, by setting each pixel's alpha from the hour's
+   *support* array (below). NaN cells stay fully transparent.
+4. **Encode** as PNG, with no text chunks or timestamps, so identical inputs produce identical
    bytes.
 
 Frames are written to `data/frames/{pm25,diff,sd}_{YYYY-MM-DDTHH}.png`, named for the kind and
 the hour's start.
+
+**Support.** A kriged surface is least trustworthy where its standard deviation is high and
+where no sensor is close enough for the variogram to carry information there. Each kriged hour
+gets one alpha array on the source grid, shared by its three frames, built from two rules that
+both apply:
+
+- *Uncertainty.* Alpha falls linearly with the kriging standard deviation as a fraction of the
+  hour's `√sill`: `α = 0.85 − 0.25 · min(sd / √sill, 1)`. The sill is the variance of a value
+  known only to be one of the hour's, so `sd / √sill` near 1 says the estimate there is no better
+  than the hour's mean, and near 0 that it is close to known. A cell at `√sill` or above takes
+  0.60; the rule never fades further, because on most hours most of the grid lies near `√sill`
+  and the Estimate view must stay readable on every hour. When the sill is 0 or missing, the rule
+  leaves 0.85.
+- *Distance.* A cell whose centre is farther from the nearest of the hour's kriging points than
+  `max(range_m, 5 km)` takes 0.40. Beyond the variogram's range the sensors carry no information
+  about the cell, and the estimate there is the kriged mean. The 5 km minimum keeps a degenerate
+  fit, whose range is a few hundred metres, from fading the whole map; such an hour is flagged
+  instead (§ Front End, *Pattern note*). When the hour's kriging points cannot be rebuilt (none
+  remain in the archive), only the uncertainty rule applies.
+
+The alpha array is reprojected with the frames (nearest neighbour) and written into each finite
+pixel as `round(255 · α)`. The fade is baked into the PNGs, so the page draws the overlay at full
+opacity and does no raster work. Measured against the hour's own sill, a small spread of standard
+deviation across the grid gives a small spread of fade, and an hour whose variogram is mostly
+nugget, whose map is mostly the hour's mean, reads faded throughout.
 
 **Bounds.** A frame's `bounds_latlon` is its EPSG:3857 extent with the south-west and north-east
 corners converted to WGS84, written `[[south, west], [north, east]]`. Leaflet's image overlay
@@ -121,10 +148,21 @@ standard-deviation array's finite cells, all on the source grid before reproject
 them to tell whether a frame passes its scale's limits; for the difference view the frame's
 extremes are `surface_min − surface_mean` and `surface_max − surface_mean`.
 
-**Nugget share.** For each `kriged` hour the manifest carries `nugget_share`, the hour's variogram
-nugget divided by its sill (null when the sill is 0). It is the fraction of the hour's variance
-the variogram attributes to noise at a point rather than to spatial structure: an hour near 1 is
+**Variogram.** For each `kriged` hour the manifest carries the fitted variogram's `range_km`
+(the fit row's `range_m` in kilometres), `nugget`, and `sill`, and `nugget_share`, the nugget
+divided by the sill (null when the sill is 0). The range is the distance beyond which two
+locations' values are uncorrelated. The nugget share is the fraction of the hour's variance the
+variogram attributes to noise at a point rather than to spatial structure: an hour near 1 is
 nearly pure noise, and kriging returns most of the grid to the hour's mean.
+
+**Monitor check.** Each monitor of a `kriged` hour carries `map_value`, band 1 of the raster cell
+containing the monitor (the cell rule evaluation's matchups use: the monitor's EPSG:26918
+coordinates through the inverted geotransform), null when the monitor lies outside the grid or
+its cell is NaN. Its `difference` is `map_value − obs`, null when the observation is flagged or
+either value is null. The hour carries `monitor_n`, the number of its monitors with a
+`difference`, and `monitor_mean_difference`, their mean (null when `monitor_n` is 0), computed
+before rounding. Monitors are not kriged, so these are an independent check on the hour's
+surface, read with evaluation's caveat that a cell is a 100 m average and a monitor a point.
 
 ### Manifest
 
@@ -146,8 +184,11 @@ hours[]             one per hour in the window, ascending and contiguous
   surface_min, surface_mean, surface_max, sd_max   null unless kriged
   n_sensors         from the fit row, null for missing
   variogram_model   from the fit row, null unless kriged
+  range_km, nugget, sill   from the fit row, null unless kriged
   nugget_share      nugget / sill from the fit row, null unless kriged or when the sill is 0
-  monitors[]        {site_id, name, lat, lon, obs, qc_flags}
+  monitor_n         monitors with a difference; 0 unless kriged
+  monitor_mean_difference  mean difference over them, null when monitor_n is 0
+  monitors[]        {site_id, name, lat, lon, obs, qc_flags, map_value, difference}
   sensors[]         {sensor_id, lat, lon, pm25_calibrated, fit_status}
 ```
 
@@ -159,12 +200,13 @@ hours[]             one per hour in the window, ascending and contiguous
 - `monitors` are the AirNow observations with `observed_at` equal to the hour, joined to their site
   records for `name`, `lat`, and `lon`. `obs` is `pm25_raw` (null when the feed reported none), and
   `qc_flags` is the observation's flag list. This is the same hour matching evaluation uses.
+  `map_value` and `difference` are as § Monitor check gives them, null unless the hour is kriged.
 - `sensors` are every `calibrated_hourly` row for the hour whose `site_id` has a site record, with
   `pm25_calibrated` null for an `uncalibrated` row. This includes the sensors fusion did not krige,
   so a reader can see that a sensor reported and why it has no value.
 - Monitors and sensors are listed for every hour, kriged or not. An hour without a surface still
   has observations worth showing.
-- Floats are rounded to two decimal places (coordinates to five). Lists are sorted by identifier,
+- Floats are rounded to two decimal places (coordinates to five, `nugget` and `sill` to four). Lists are sorted by identifier,
   and the JSON is written with sorted keys. Two builds over the same archive state therefore
   differ only in `generated_at`.
 
@@ -203,9 +245,11 @@ county and state lines, with Esri's attribution beside OpenStreetMap's.
 serves every file with a ten-minute cache lifetime, and the manifest is the one file that changes
 under the same name each hour. Frames are named by hour and never change once kriged, so they cache
 freely. The page then fits the map to the frames'
-`bounds_latlon`, and shows the latest hour. The current frame is one image overlay at opacity 0.85
-over the basemap: opaque enough that neighbouring colours on the scale stay distinguishable, with
-the basemap's roads and rivers still showing through. The names layer sits in its own pane above
+`bounds_latlon`, and shows the latest hour. The current frame is one image overlay at full
+opacity: each pixel already carries its alpha (§ Support), 0.85 where the estimate is best
+supported, opaque enough that neighbouring colours on the scale stay distinguishable with the
+basemap's roads and rivers still showing through, and fading to 0.40 where it is least supported.
+The names layer sits in its own pane above
 the overlay and below the monitor and sensor markers. Its names carry a light halo, so they read
 at full contrast on every colour of every scale, and the pane takes no pointer events, so a click
 or tap reaches the marker or map beneath it.
@@ -215,13 +259,26 @@ switches every frame between the `pm25`, `diff`, and `sd` images. The legend is 
 gradient drawn from the active scale's `stops`, labelled with the scale's `min` and `max`, its
 units, and its label; the Difference view's label is "Above / below this hour's average (µg/m³)".
 When the current frame passes a limit, the legend shows an arrow at that end (▲ at the top, ▼ at
-the bottom) and the text "values beyond the scale shown in its end colours".
+the bottom) and the text "values beyond the scale shown in its end colours". On a kriged hour
+the legend also says "Faded areas: far from sensors / high uncertainty".
+
+**Pattern note.** On a kriged hour whose variogram range is under 1 km (`range_km < 1`), a small
+note on the map reads "Spatial pattern not detectable this hour; map ≈ hour average." Such a range
+is shorter than the spacing of almost any two sensors, so the fit found no spatial structure and
+the surface is the hour's mean everywhere but at the sensors themselves.
 
 **Hour caption.** Under the hour label, a kriged hour is described as
-`Kriged from N sensors · {model} variogram · range {min}–{max} µg/m³ · nugget {P}% of sill`, from
-`n_sensors`, `variogram_model`, `surface_min`, `surface_max`, and `nugget_share` (the nugget part
-is omitted when `nugget_share` is null). A flat-looking hour therefore explains itself: its
-range is narrow, its nugget share high, or both.
+`Kriged from N sensors · {model} variogram · values {min}–{max} µg/m³ · variogram range {R} km ·
+nugget {P}% of sill`, from `n_sensors`, `variogram_model`, `surface_min`, `surface_max`,
+`range_km` (one decimal), and `nugget_share` (the nugget part is omitted when `nugget_share` is
+null). "Values" names the spread of the estimate and "variogram range" the distance, so neither
+reads as the other. A flat-looking hour explains itself: its values span little, its nugget share
+is high, or both.
+
+Under the caption, a kriged hour with `monitor_n` at least 1 reads
+`Monitors: mean difference {D} µg/m³, n = {n}`, from `monitor_mean_difference` (one decimal,
+signed) and `monitor_n`; the difference is map minus observed, so a negative value means the map
+reads low at the monitors.
 
 **Animation.**
 - A play/pause button and a range slider span every hour of the window, gaps included.
@@ -237,7 +294,10 @@ range is narrow, its nugget share high, or both.
 **Monitors and sensors** are drawn for the hour shown, with no fill colour, so nothing on the map
 competes with the surface's colour scale.
 - AirNow monitors are hollow triangles labelled with the observed value to one decimal, followed
-  by `*` when the observation carries any QC flag. A null observation is labelled `n/a`.
+  by `*` when the observation carries any QC flag (`n/a` for a null observation). When the
+  monitor has a `map_value`, the label adds ` · map {value}`, and when it has a `difference`,
+  ` ({difference})` signed, both to one decimal: `7.0 · map 4.5 (−2.5)`. A flagged hour reads
+  `7.0* · map 4.5`, with no difference.
 - Every monitor's label stays readable wherever monitors sit close together. A label sits to the
   right of its triangle unless that would overlap a label already placed or another monitor's
   triangle; it then takes the first clear side of left, below, and above, and stays on the right
@@ -260,6 +320,11 @@ that the twin has stopped. The freshness line gives the reader the hours to judg
   own average across the metro;
 - what the uncertainty map shows: the kriging standard deviation, which is lowest near sensors and
   grows with distance from them;
+- what the nugget share means: the part of sensor-to-sensor variation the variogram treats as
+  short-scale noise or measurement error (typical for low-cost sensors), so a high share means the
+  map smooths toward the hour's average;
+- that faded areas are far from sensors or where the uncertainty is highest;
+- what the monitor labels show: observed, map value, and map minus observed;
 - that AirNow data are preliminary and unvalidated;
 - that the page is a research prototype and not for regulatory or health decisions;
 - a link to the repository.
@@ -301,12 +366,14 @@ creation, because only this one test depends on it.
 | Frame CRS | Reprojected to EPSG:3857 at build time | Leaflet stretches an image overlay linearly in Web Mercator. A frame already in that projection sits exactly on the basemap, and the page does no raster work. |
 | Resampling | Nearest neighbour | Each pixel shows a cell's own value, as Maps' figures do. Interpolation would invent values between cells. |
 | Difference view | Estimate minus the hour's mean on a fixed symmetric diverging scale, beside the absolute estimate | Clean hours span a couple of µg/m³, which reads as one colour on an absolute scale that must also hold smoky hours. Subtracting the hour's own mean shows its spatial pattern without stretching the absolute scale per hour, and fixed symmetric limits keep difference maps comparable across hours. |
-| Overlay opacity | 0.85 | Neighbouring colours on a fixed scale differ little, and a basemap seen through a thin overlay washes them together; 0.85 keeps them apart while roads and rivers still show for orientation. |
+| Overlay opacity | Per pixel, baked into the frames: 0.85 where best supported, falling to 0.60 as the standard deviation approaches the hour's `√sill`, and 0.40 beyond the variogram range (at least 5 km) from the nearest sensor | Neighbouring colours on a fixed scale differ little, and a basemap seen through a thin overlay washes them together; 0.85 keeps them apart where the estimate deserves reading. Fading the rest tells the reader where not to read it, in the same image, on every view. Baking it at build time keeps the page free of raster work. |
+| Support rules | Standard deviation as a fraction of `√sill`, stopping at 0.60, plus `max(range, 5 km)` as a distance cut to 0.40 | The standard deviation's absolute size changes with each hour's sill, so dividing by `√sill` makes one rule mean the same on every hour, and a narrow spread across the grid produces little fade. Most cells sit near `√sill` on most hours, so the uncertainty rule stops at 0.60 to keep the Estimate view readable on every hour. Cells beyond the range fade further, to 0.40, since there the variogram gives the sensors no weight beyond the mean; the 5 km minimum stops a degenerate sub-kilometre fit from fading the whole map, and the pattern note says what such an hour is. |
+| Monitor check | Map value at the monitor's cell, map minus observed, and the hour's mean difference over unflagged monitors | The monitors are not kriged, so their residuals are the one independent check on each hour a reader can see. The cell rule is evaluation's, so the page and the evaluation report agree on every residual. |
 | Colour scales | Maps' `colorize` and `colour_stops`, fixed limits from `MapSettings` | One definition of what a value looks like, shared with the evaluation figures. The legend is generated from the same colours, so it cannot drift from the frames. |
 | Gap hours | Listed with a status and no frames | The timeline stays uniform in time, so the animation's speed is the clock's and a missing surface reads as missing. |
 | Default window end | The latest kriged hour, searched back seven days | The page opens on a real surface even when the most recent hours were not kriged. The freshness line says how old that surface is. |
 | Markers | Hollow triangles (monitors) and hollow circles (sensors), no fill | On a coloured surface over a coloured basemap, a filled marker reads as a value on the scale. Outlines locate a site without competing with the surface. |
-| Monitor label | Observed value as text, `*` when flagged | The reference value is the number a reader compares the surface with, and the asterisk keeps a flagged hour visible without hiding the value (flag, never drop). |
+| Monitor label | Observed value, map value, and their difference as text, `*` and no difference when flagged | The reference value is the number a reader compares the surface with, and the map value beside it makes the comparison without reading colours. The asterisk keeps a flagged hour visible without hiding the value (flag, never drop), and a flagged hour gives no difference to trust. |
 | Displayed time | Eastern time only, through `Intl` with `America/New_York`, 12-hour clock with the zone's abbreviation | The twin covers the D.C. metro, whose readers keep Eastern time; the archive and manifest stay in UTC, and the page converts only for display. `America/New_York` lets the browser handle daylight saving, and the abbreviation tells apart the two 1 AM hours of the autumn change. |
 | Label placement | In the page, greedy over four sides of the triangle, redone on each hour and zoom | Whether two labels collide depends on the zoom and on each label's text, which only the page knows. Four fixed sides keep each label beside its own triangle, so no leader line is needed to tell which value belongs to which monitor; manifest order makes the placement the same on every load. |
 | Leaflet delivery | cdnjs, version-pinned with an SRI hash | No build step and no vendored library to update, and the integrity hash makes the pinned file the only one the browser will run. |

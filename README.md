@@ -32,12 +32,21 @@ later phase.
 - **Fusion.** Each hour, the calibrated sensor values are kriged onto a
   100 m grid over the metro (ordinary kriging, variogram refit per hour),
   written as a two-band Cloud-Optimized GeoTIFF: PM2.5 and its kriging
-  variance.
+  variance. Each hour's variogram reports a nugget share: the part of
+  sensor-to-sensor variation the variogram treats as short-scale noise or
+  measurement error (typical for low-cost sensors). A high share means the
+  map smooths toward the hour's average.
 - **Evaluation.** `aqdt evaluate --start T --end T --out DIR` scores the
   stored surfaces against the AirNow monitors they never saw, adds the
   calibration fits' uncertainty to the kriging variance (checked by Monte
   Carlo), and writes an error budget, tables, and print-ready figures. It
-  runs on demand and reads the archive only.
+  runs on demand and reads the archive only. `aqdt evaluate influence
+  --hour T --out DIR [--center LAT,LON] [--radius-km R]` checks whether a
+  hotspot on one hour's surface survives removing any single sensor.
+- **Dashboard.** `aqdt dashboard build` renders the latest 48 hours as a
+  static site on GitHub Pages: estimate, difference from the hour's
+  average, and uncertainty, faded where the estimate is far from sensors,
+  with each AirNow monitor's observed and map values side by side.
 - **Serving.** A PostGIS database, rebuildable from the S3 archive at any
   time, serves calibrated hourly observations for querying and mapping.
 
