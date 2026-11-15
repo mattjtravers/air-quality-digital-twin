@@ -1,2 +1,0 @@
-hour,surface_uri,variogram_model,sill,range_m,nugget,n_sensors,n_points,pm25_max,pm25_clipped_fraction,sd_max,sd_clipped_fraction,monitor_mean
-2026-10-02 16:00:00+00:00,s3://air-quality-digital-twin-585949919812-us-east-1-archive/dc-metro/fusion/surfaces/date=2026-10-02/pm25_2026-10-02T16.tif,spherical,5.390580442627972,7307.85963405098,1.7818937777038368,127,126,12.137939453125,0.024258088337102506,2.3423380851745605,0.0,12.425
