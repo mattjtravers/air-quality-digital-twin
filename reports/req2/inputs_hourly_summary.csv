@@ -1,0 +1,11 @@
+metric,value
+sensor_hours,80616
+distinct_sensors,174
+sensor_hours_with_n_flagged_gt_0,0
+sensor_hours_with_n_flagged_gt_0_share,0.0
+sensor_hours_with_snapshots_but_no_trusted_row,16770
+sensors_per_hour_median,138.0
+sensors_per_hour_min,0
+sensors_per_hour_max,154
+hours_with_zero_sensors,3
+stored_matches_aggregate_hourly,True

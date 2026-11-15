@@ -1,0 +1,12 @@
+metric,value
+snapshots,97589
+distinct_sensors,193
+sensor_hours_with_any_snapshot,97386
+snapshots_per_sensor_hour_median,1.0
+snapshots_per_sensor_hour_q1,1.0
+snapshots_per_sensor_hour_q3,1.0
+snapshots_per_sensor_hour_iqr,0.0
+snapshots_per_sensor_hour_max,3
+sensor_hours_with_more_than_one_snapshot,200
+unflagged_snapshots_with_null_pm25_corrected,5242
+  of_which_humidity_missing,5242
