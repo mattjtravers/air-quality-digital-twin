@@ -861,6 +861,196 @@ the removal's value minus the control's.
   the control's measures, the most influential sensor, and whether the hotspot survives every
   single removal. `InfluenceSummary` carries the same.
 
+## Development and test windows
+
+`evaluate` scores one window, and every choice made while reading its report — which diagnostic to
+believe, how large the missing variance term is, which forest settings to use — is made on that
+window. The holdout run checks those choices on hours that played no part in them. It takes a
+**development window** `D` and a later, disjoint **test window** `T`, evaluates both with the same
+settings, estimates anything that is estimated (the shared hourly offset, the forest's
+hyperparameters and fit) on `D` alone, and scores it on `T`. It is a separate, on-demand run, like
+the influence check: it reads the archive and writes its own output directory.
+
+`holdout(archive_uri, dev, test, out_dir, settings, *, pack=False) -> HoldoutSummary`, with `dev`
+and `test` half-open `(start, end)` windows (EVAL-IN-003 applied to each) and `settings` the
+`EvaluationSettings` used for both, invoked by `aqdt evaluate holdout --dev-start --dev-end
+--test-start --test-end --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]
+[--pack]`. `T` must start at or after `D` ends; overlapping windows fail validation before
+anything is written. `HoldoutSummary` carries the two windows, `out_dir`, the `.tgz` path (null
+without `pack`), and the chosen forest configuration.
+
+**The two evaluations.** `evaluate` runs on each window into `out_dir/dev/` and `out_dir/test/`,
+unchanged, so each subdirectory is a complete evaluation report. Everything below reads their
+`matchups.csv`, `metrics.csv`, `coverage_diagnostics.csv`, and `lomo.csv`, and re-reads the archive
+only for what those files do not hold: each hour's kriging points (rebuilt with fusion's
+`hour_sensors` and `hour_points`, as § Matchups rebuilds them) and, for one map, one hour's
+calibration inputs.
+
+Unless stated otherwise, every statistic on `T` is over `T`'s unflagged matchups, and every interval
+is the day bootstrap of § Confidence intervals over `T`'s days, seeded with `seed`. The
+uncertainty statistics share one matchup set, the **scored set**: `T`'s unflagged matchups that
+`cov1_total` counts (`inputs_reproduced`, non-null `cal_variance`, `total_sd > 0`), so every
+variance is judged on the same matchups.
+
+### Completeness
+
+`completeness.csv`, one row per window: hours in the window, kriged hours, hours with no
+`surface_fits` row, hours with a non-kriged row by status, distinct days with a kriged hour, AirNow
+monitor hours at kriged hours (all, non-null `pm25_raw`, unflagged non-null), the possible monitor
+hours (kriged hours × monitors inside the grid), matchups (all and unflagged), and scored-set
+matchups.
+
+### Development against test
+
+`dev_vs_test.csv` puts the two windows side by side, one row per statistic and one column pair
+(estimate, interval) per window: from each `metrics.csv` `unflagged` overall row, `n`, `bias`,
+`mae`, `rmse`, `r2`, `pearson_r`, `cov1_krig`, `cov2_krig`, `cov1_total`, `cov2_total` with their
+day-bootstrap intervals; and from each `lomo.csv`, over its unflagged rows, the RMSE of
+`stored_error`, `control_error`, and `lomo_error` and the median `d` with its hour-bootstrap
+interval (EVAL-LOMO-006). Each window's intervals are its own window's bootstrap.
+
+### Shared offset out of sample
+
+`σ²_shared` is the shared hourly calibration offset of § Coverage diagnostics, estimated on `D`
+alone — the `σ²_shared` of `D`'s `coverage_diagnostics.csv` (EVAL-UNC-003), whose residuals use
+only `D`'s hours. On `T`, the **total + D-offset** variance is `total_variance + σ²_shared(D)`, and
+`oos_offset.csv` gives `σ²_shared(D)`, its hour count, and the ±1 SD and ±2 SD coverage of
+`error / √(total_variance + σ²_shared(D))` over the scored set, with intervals. Because nothing
+about `T` enters the estimate, this is the out-of-sample test of the term the in-sample and
+split-day checks could only diagnose.
+
+### Reliability of the intervals
+
+A variance is right when the central interval it implies holds its nominal share of the errors at
+every width, not only at ±1 and ±2 SD. For nominal central coverage `p` at the half-widths `k` =
+0.6745, 1, 1.2816, 1.6449, and 2 SD (`p = 2Φ(k) − 1`: 50, 68.27, 80, 90, 95.45%), the observed
+coverage is the share of the scored set with `|error| / sd_m ≤ k`, for four standard deviations
+`sd_m`:
+
+- `kriging` — `sd`;
+- `total` — `total_sd`;
+- `total_dev_offset` — `√(total_variance + σ²_shared(D))`;
+- `rf_trees` — the development forest's tree spread `rf_sd` (§ Forest trained on the development
+  window), scoring `rf_dev − obs`.
+
+`reliability_coverage.csv` holds one row per (`sd_m`, `p`) with `k`, `n`, the observed coverage,
+and its interval; the `reliability_coverage` figure plots observed against nominal with the 1:1
+line, one line per `sd_m`, with interval bars. A line below the diagonal is an interval too narrow.
+
+### Where and when the uncertainty is large
+
+All over the scored set:
+
+- **Spread–skill.** Matchups binned into quintiles of `total_sd` (edges merged when they coincide,
+  as § Metrics does). Per bin: `n`, the bin's `total_sd` range, mean `total_sd`, RMS `total_sd`
+  (`√mean total_variance`, the value a correct variance makes equal to the RMSE of an unbiased
+  error), `rmse` and `bias` with intervals, and `cov1_total`. The `spread_skill` figure plots RMSE
+  (with interval) against RMS and mean `total_sd`, with the 1:1 line.
+- **Distance to the nearest sensor.** Bins of `nearest_sensor_km` with edges 0.75, 1.25, and 2 km
+  (`< 0.75`, `0.75–1.25`, `1.25–2`, `≥ 2`). Each monitor's nearest sensor barely moves between
+  hours, so a bin is a few monitors and the bin lists them. Per bin: the monitors, `n`, mean `sd`,
+  mean `total_sd`, mean `|error|` and `rmse` with intervals.
+- **Local hour of day.** The same columns per hour of day in `America/New_York` (the hour's start,
+  converted), 0–23.
+- **Per monitor.** One row per monitor: `site_id`, `name`, `n`, mean `nearest_sensor_km`, `bias`
+  and `rmse` with intervals, and the ±1 SD and ±2 SD coverage with `sd`, `total_sd`, and the
+  total + D-offset SD, with intervals.
+
+Files `spread_skill.csv`, `by_distance.csv`, `by_local_hour.csv`, `by_monitor.csv`, each with a
+figure of the same name: `by_distance` and `by_local_hour` plot mean `sd`, mean `total_sd`, and
+mean `|error|` (with its interval) on one µg/m³ axis; `by_monitor` shows each monitor's RMSE with
+its interval beside its ±1 SD and ±2 SD coverage for the three SDs against 68.3% and 95.4%.
+
+**Total-SD map.** One `T` hour drawn as `√(kriging variance + cal_variance)` at every grid cell —
+the stored band 2 plus the calibration term of § Total uncertainty evaluated with `λ` at each cell
+centre, from the hour's rebuilt calibration inputs. The **typical hour** is, among `T`'s kriged
+hours with a scored-set matchup and variogram class `regular` (any class when none is `regular`),
+the one whose median matchup
+`total_sd` is closest to the median of that value over those hours, the earliest on a tie. It is
+drawn on Maps' `sd` scale with the monitors marked and the hour's kriging sensors marked by
+`fit_status`, `fitted` and `pooled` in two distinguishable markers with a legend. The CSV gives the
+hour, its cell count, the maximum total SD, the fraction of cells above `sd_max`, and each sensor's
+`site_id`, coordinates, and `fit_status`.
+
+### Forest trained on the development window
+
+The `rf` baseline is trained on the hours it predicts. Here a forest is trained, tuned, and fitted
+on `D`'s kriging points only, then scored on `T`.
+
+- **Data.** One row per kriging point of every `D` kriged hour, with the baseline's features — `x`,
+  `y`, UTC hour of day, and the hour's median point value — and the point value as target.
+- **Grid.** `n_estimators ∈ {200, 500}`, `min_samples_leaf ∈ {1, 5, 20}`, `max_features ∈ {1.0,
+  0.5}`: twelve configurations, each a `RandomForestRegressor` with `random_state = seed`.
+- **Cross-validation.** `GroupKFold` grouped by UTC day, with 5 folds (as many as `D` has days
+  when it has fewer, and at least 2), so a day's points are never split between training and
+  scoring. A configuration's score is the RMSE over a fold's held-out
+  points, averaged over folds. `rf_grid.csv` holds one row per configuration with each fold's RMSE,
+  the mean and SD over folds, and its rank.
+- **Choice.** The configuration with the lowest mean RMSE; on a tie, the fewer trees, then the larger
+  `min_samples_leaf`, then `max_features = 0.5`. It is refitted on all of `D`'s points.
+- **Prediction.** `rf_dev` at each `T` matchup from the monitor's `x`, `y`, UTC hour of day, and the
+  `T` hour's median point value; `rf_sd`, the standard deviation of the individual trees'
+  predictions (population, `ddof = 0`); both are written per matchup to `rf_dev.csv`. The tree spread measures disagreement among trees, not the
+  error of a prediction, and it says nothing about the noise in the target, so it is expected to
+  be narrow; it is scored as a variance only to compare it with kriging's.
+
+`methods_test.csv` scores, on `T`'s unflagged matchups, `kriging` (the stored `surface`), `rf_dev`,
+`idw`, and `hour_mean` (the last two from `T`'s matchups), and `rf_in_window` (`T`'s own `rf`),
+labelled a reference only wherever it appears — it is trained on the hours it is scored on, so it
+is not a test-window score, with `n`, `bias`, `mae`, `rmse`, `r2`, `pearson_r` and their
+intervals, plus the paired mean `|kriging error| − |method error|` with its interval; `rf_dev`'s
+±1 SD and ±2 SD coverage with `rf_sd` over the scored set goes in the same file. The
+`methods_test` figure shows each method's RMSE and bias with intervals.
+
+**Feature attribution.** SHAP values of the chosen forest (`shap`'s `TreeExplainer`) on 1000 of `T`'s
+kriging points drawn without replacement with the seed (all of them when fewer). `shap_importance.csv`
+gives each feature's mean `|SHAP|`, in µg/m³, in descending order; the `shap_beeswarm` figure is
+`shap`'s beeswarm of the same values.
+
+### Prediction examples
+
+- **Example day.** A local date (`America/New_York`) in `T` every one of whose local hours, and the
+  next date's local 00:00, is kriged; among those dates, the one whose kriging RMSE over its
+  unflagged matchups is the median (the lower median, the earliest on a tie).
+- **Time series** (`example_timeseries`). Three monitors with at least 20 unflagged matchups on the
+  example day — those with the smallest, the median, and the largest mean `nearest_sensor_km` —
+  one panel each over the day's local hours: the monitor's `obs` (flagged readings drawn hollow),
+  `surface`, and the out-of-sample prediction interval `surface ± 2 √(total_variance +
+  σ²_shared(D))` as a band, with the lighter inner band `surface ± 2 total_sd` inside it.
+- **Surface maps** (`example_maps`). Four panels: the example day's 06:00, 12:00, and 18:00 local
+  and the next date's 00:00 local, through Maps' `small_multiples` with `pm25_max = 10`, sensors
+  and monitors overlaid, one fixed scale.
+
+### Reproducibility
+
+`run_config.json` records:
+
+- the command line as invoked (`sys.argv`) and the two windows;
+- the effective settings: every `AQDT_`-prefixed environment variable, and the resolved values of
+  `EvaluationSettings`, `CalibrationSettings`, `FusionSettings`, and `MapSettings`, with the value
+  of any variable or field whose name contains `KEY`, `TOKEN`, `SECRET`, or `PASSWORD`, and the
+  password of any URL, replaced by `"<redacted>"`;
+- the forest grid, the fold count and grouping, the selection rule, and the chosen configuration;
+- the variogram options fusion selects with (candidate models and their fitting settings);
+- the calibration rules: the Barkjohn correction and its constants, the pairing distance, window,
+  minimum pairs, the slope gate, and the pooled fallback;
+- the seed, the SHAP sample size, and the reliability half-widths;
+- the installed versions of `aqdt`, `numpy`, `pandas`, `scipy`, `scikit-learn`, `pykrige`,
+  `shap`, `matplotlib`, `rasterio`, and `pyproj`, and the Python version;
+- `git_commit`, `git_dirty`, and `git_diff_sha256` as in `run.json`, and the archive URI.
+
+**Outputs**, in `out_dir`: `dev/` and `test/` (the two evaluations), the CSVs and figures above,
+`figures.md` (every figure written, numbered, with a one-sentence caption naming what is plotted,
+the matchup set, and the units), `summary.md` (completeness; the development–test table; the
+out-of-sample offset coverage; the reliability table; the chosen forest and its test scores; the
+SHAP ranking; and the caveats that the forest's tree spread is not a predictive variance, that
+each distance bin holds only 2–3 monitors (the bins' monitor counts stated), so the distance
+result is indicative, that `rf_in_window` is a reference only, and that `T`'s calibration fits are trained over trailing
+windows that reach into `D`), and `run_config.json`. Figures follow § Figures (300 dpi, 3.3–6.5 in,
+labelled axes with units, a CSV of the same name). With `pack`, after every file is written, the
+directory is archived as `<out_dir>.tgz` beside it, with the directory's name as its top-level
+entry.
+
 ## Package Layout
 
 ```
@@ -884,10 +1074,14 @@ src/aqdt/evaluation/
   spikes.py       # spike rule, re-krige, value tiers
   anomaly.py      # common offset and within-hour anomaly
   influence.py    # sensor influence at a hotspot: re-krige without each sensor, evidence, figure
+  holdout.py      # development and test windows: the two evaluations, comparison, reliability,
+                  # where the uncertainty is large, the total-SD map, examples, run_config.json
+  holdout_figures.py  # the holdout run's figures
+  forest.py       # the development-window forest: grid, grouped cross-validation, tree spread, SHAP
 tests/evaluation/
 ```
 
-Dependencies: `matplotlib` and `scikit-learn`, in the `analysis` dependency group — scheduled runs
+Dependencies: `matplotlib`, `scikit-learn`, and `shap`, in the `analysis` dependency group — scheduled runs
 never evaluate, so their environments do not install them.
 
 ## Decisions
@@ -918,6 +1112,12 @@ never evaluate, so their environments do not install them.
 | Hotspot influence | Remove one sensor at a time within a radius, refitting the variogram, against a control re-krige | A hotspot drawn by one sensor disappears when that sensor goes and one that several sensors see does not; removing them singly names the sensor responsible. Refitting is what the twin would have done without the sensor, and the control holds everything else fixed. |
 | Hotspot criterion | Cells within the radius more than 2 µg/m³ above the hour's mean | A hotspot is defined against its own hour, as the difference view shows it; 2 µg/m³ is above the scatter a clean hour's surface carries, and small enough to catch what a reader sees. |
 | Sensor evidence | Channel agreement, the calibration fit, and a week of top-5% persistence split by rush hour | Each tests one explanation for a sensor reading high: a failing channel, a poor calibration line, or where the sensor is. Rush-hour persistence alone points at traffic; persistence at every hour points at the site or the sensor. |
+| Development and test windows | Everything estimated (shared offset, forest settings and fit) comes from `D`; `T` only scores | A window scored by choices made on itself flatters them; a later, disjoint window that informed nothing is the honest check, and running `evaluate` unchanged on both keeps the two reports comparable line for line. |
+| Uncertainty statistics on one matchup set | The scored set: unflagged, `inputs_reproduced`, non-null `cal_variance` | Comparing kriging, total, offset-augmented, and forest variances on different matchups would mix a difference in matchups into a difference in variance. |
+| Reliability widths | Central coverage at 50, 68.27, 80, 90, 95.45% | ±1 and ±2 SD test two points of the error distribution; five widths show whether a shortfall is a scale (every width short) or a tail (only the wide ones). |
+| Forest tuning | Grid over trees, leaf size, and feature share, `GroupKFold` by UTC day on `D`, scored at held-out sensor points | Points of one hour share its level and points of one day its weather, so grouping by day is what keeps a fold's score out of sample; scoring at sensor points keeps the monitors, which `T` scores at, out of every choice. |
+| Forest uncertainty | Spread of the trees' predictions | It comes with the fitted forest at no cost and is the uncertainty a forest user would reach for first; scoring it beside kriging's variance shows how far it is from a predictive interval. |
+| Feature attribution | TreeExplainer SHAP on a seeded sample of `T`'s points | Exact for tree ensembles and additive per prediction, so the mean `|SHAP|` is in µg/m³ and the ranking reads as what the forest leans on in the test window. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions

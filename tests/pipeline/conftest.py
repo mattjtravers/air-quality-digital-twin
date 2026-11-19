@@ -70,6 +70,19 @@ class InfluenceResult:
 
 
 @dataclass
+class HoldoutResult:
+    """Stands in for ``HoldoutSummary``: the attributes the CLI prints."""
+
+    dev: tuple = (datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 10, 25, 17, tzinfo=UTC))
+    test: tuple = (datetime(2026, 10, 26, tzinfo=UTC), datetime(2026, 11, 16, tzinfo=UTC))
+    out_dir: str = "OUT"
+    archive: str | None = None
+    rf_choice: dict = field(
+        default_factory=lambda: {"n_estimators": 200, "min_samples_leaf": 5, "max_features": 0.5}
+    )
+
+
+@dataclass
 class DashboardResult:
     """Stands in for the dashboard's ``BuildSummary``: the attributes the CLI prints."""
 
@@ -134,6 +147,8 @@ def stubs(monkeypatch) -> Stubs:
     monkeypatch.setattr(cli, "evaluate", s.make("evaluate"), raising=False)
     s.results["sensor_influence"] = InfluenceResult()
     monkeypatch.setattr(cli, "sensor_influence", s.make("sensor_influence"), raising=False)
+    s.results["holdout"] = HoldoutResult()
+    monkeypatch.setattr(cli, "holdout", s.make("holdout"), raising=False)
     s.results["build_site"] = DashboardResult()
     monkeypatch.setattr(cli, "build_site", s.make("build_site"), raising=False)
     s.connection = FakeConnection()

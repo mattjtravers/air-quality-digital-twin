@@ -110,6 +110,15 @@ def sensor_influence(*args: Any, **kwargs: Any) -> Any:
     return run(*args, **kwargs)
 
 
+def holdout(*args: Any, **kwargs: Any) -> Any:
+    """``aqdt.evaluation.holdout.holdout``, imported on use, as ``evaluate`` is."""
+    try:
+        from aqdt.evaluation.holdout import holdout as run
+    except ModuleNotFoundError as error:
+        raise _missing_analysis("evaluate holdout", error) from error
+    return run(*args, **kwargs)
+
+
 # @spec PIPE-CLI-017
 def build_site(*args: Any, **kwargs: Any) -> Any:
     """``aqdt.dashboard.build.build_site``, imported on use: Maps' colormaps need the
@@ -182,6 +191,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--radius-km", type=_positive_float, default=5.0, help="radius in km (default 5)"
     )
 
+    holdout_ = analyses.add_parser(
+        "holdout", help="tune and estimate on a development window, score on a test window"
+    )
+    for name, text in (
+        ("--dev-start", "development window start"),
+        ("--dev-end", "development window end, exclusive"),
+        ("--test-start", "test window start"),
+        ("--test-end", "test window end, exclusive"),
+    ):
+        holdout_.add_argument(name, type=_timestamp, required=True, help=f"{text} (ISO 8601)")
+    holdout_.add_argument("--out", type=Path, required=True, help="output directory")
+    holdout_.add_argument("--mc-hours", type=_positive_int, help="Monte Carlo hours")
+    holdout_.add_argument("--mc-draws", type=_positive_int, help="Monte Carlo draws per hour")
+    holdout_.add_argument(
+        "--lomo-hours", type=_non_negative_int, help="leave-one-monitor-out hours (0 skips it)"
+    )
+    holdout_.add_argument("--seed", type=_non_negative_int, help="random seed")
+    holdout_.add_argument(
+        "--pack", action="store_true", help="also write the output directory as DIR.tgz"
+    )
+
     dashboard = commands.add_parser("dashboard", help="the static dashboard site")
     dashboard_steps = dashboard.add_subparsers(dest="step", required=True)
     dashboard_build = dashboard_steps.add_parser(
@@ -241,6 +271,22 @@ def _configure_logging(level: str) -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def _hour(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+
+
+def _evaluation_settings(args: argparse.Namespace):
+    """``EvaluationSettings()`` overridden by whichever evaluation options were given."""
+    from aqdt.evaluation.schemas import EvaluationSettings
+
+    overrides = {
+        name: getattr(args, name)
+        for name in ("mc_hours", "mc_draws", "lomo_hours", "seed")
+        if getattr(args, name, None) is not None
+    }
+    return EvaluationSettings(**overrides)
+
+
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -266,6 +312,7 @@ class _Connection:
 # @spec PIPE-CLI-003, PIPE-CLI-004, PIPE-CLI-005, PIPE-CLI-006, PIPE-CLI-007, PIPE-CLI-010
 # @spec PIPE-CLI-014, PIPE-WIN-005, PIPE-OUT-001, PIPE-OUT-002, PIPE-OUT-003, PIPE-OUT-006
 # @spec PIPE-CLI-015, PIPE-OUT-007, PIPE-CLI-016, PIPE-OUT-008, PIPE-CLI-018, PIPE-OUT-009
+# @spec PIPE-CLI-019, PIPE-OUT-010
 def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict[str, Any] | None:
     """Run the requested command and return what to print (``None`` for the db commands)."""
     if args.command == "db":
@@ -322,20 +369,23 @@ def _dispatch(args: argparse.Namespace, archive_uri: str, now: datetime) -> dict
             "survives_every_removal": summary.survives_every_removal,
         }
 
-    if args.command == "evaluate":
-        from aqdt.evaluation.schemas import EvaluationSettings
-
-        overrides = {
-            name: value
-            for name, value in (
-                ("mc_hours", args.mc_hours),
-                ("mc_draws", args.mc_draws),
-                ("lomo_hours", args.lomo_hours),
-                ("seed", args.seed),
-            )
-            if value is not None
+    if args.command == "evaluate" and args.analysis == "holdout":
+        dev = tuple(_hour(t) for t in (args.dev_start, args.dev_end))
+        test = tuple(_hour(t) for t in (args.test_start, args.test_end))
+        log.info("evaluate holdout dev [%s, %s) test [%s, %s)", *map(_iso, (*dev, *test)))
+        summary = holdout(
+            archive_uri, dev, test, args.out, _evaluation_settings(args), pack=args.pack
+        )
+        return {
+            "dev": {"start": _iso(summary.dev[0]), "end": _iso(summary.dev[1])},
+            "test": {"start": _iso(summary.test[0]), "end": _iso(summary.test[1])},
+            "out_dir": str(args.out),
+            "archive": str(summary.archive) if summary.archive is not None else None,
+            "rf_choice": summary.rf_choice,
         }
-        settings = EvaluationSettings(**overrides)
+
+    if args.command == "evaluate":
+        settings = _evaluation_settings(args)
         start, end = resolve_window(now, args.start, args.end, None)
         log.info("evaluate window [%s, %s)", _iso(start), _iso(end))
         summary = evaluate(archive_uri, start, end, args.out, settings)

@@ -51,3 +51,17 @@ class InfluenceSummary(BaseModel):
     most_influential: dict | None
     n_removed: int
     survives_every_removal: bool
+
+
+# @spec EVAL-HOLD-001
+class HoldoutSummary(BaseModel):
+    """What ``holdout`` returns: the two windows, where the outputs are, the packed archive (when
+    asked for), and the forest configuration chosen on the development window."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    dev: tuple[datetime, datetime]
+    test: tuple[datetime, datetime]
+    out_dir: Path
+    archive: Path | None
+    rf_choice: dict[str, int | float]

@@ -47,6 +47,7 @@ sub-command per run plus the serving-layer maintenance commands:
 | `aqdt db rebuild` | `rebuild` | — |
 | `aqdt evaluate --start T --end T --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N]` | `evaluate` | none: the window is required |
 | `aqdt evaluate influence --hour T --out DIR [--center LAT,LON] [--radius-km R]` | `sensor_influence` | none: the hour is required |
+| `aqdt evaluate holdout --dev-start T --dev-end T --test-start T --test-end T --out DIR [--mc-hours N] [--mc-draws N] [--lomo-hours N] [--seed N] [--pack]` | `holdout` | none: both windows are required |
 | `aqdt dashboard build --out DIR [--hours N] [--end T]` | `build_site` | the `N` hours (default 48) ending at the latest kriged hour, resolved by the dashboard from the build time |
 
 `aqdt evaluate` is on demand only: it has no routine window, no workflow, and no schedule, opens no
@@ -54,7 +55,10 @@ PostGIS connection (evaluation reads the archive and writes a report directory),
 override the matching `EvaluationSettings` values. `aqdt evaluate influence` is the evaluation
 segment's one-hour hotspot check, on demand in the same way; `--hour` is truncated to the hour,
 `--center` is a WGS84 `lat,lon` (default: the hour's peak cell), and `--radius-km` defaults to 5.
-Both need the `analysis` dependency group; without it the command fails naming the group.
+`aqdt evaluate holdout` is the evaluation segment's development-and-test-window run, on demand in
+the same way; its windows are truncated to the hour, its options override `EvaluationSettings` as
+`aqdt evaluate`'s do, and `--pack` also writes the output directory as a `.tgz` beside it.
+All three need the `analysis` dependency group; without it the command fails naming the group.
 
 `aqdt dashboard build` likewise opens no PostGIS connection and needs the `analysis` group (Maps'
 colormaps), failing naming the group without it. It passes the current time as `generated_at`;
@@ -85,7 +89,8 @@ archived while it was idle.
 `IngestSummary`, a fit run's count of fits by status, an apply run's row count and window, a
 fuse run's window and count of surfaces by status, an evaluate run's window, report directory, and
 headline metrics, an influence run's hour, centre, output directory, most influential sensor, and
-whether the hotspot survives every removal, a dashboard build's window, latest hour, hours by status, frames, site size, and
+whether the hotspot survives every removal, a holdout run's two windows, output directory, and
+chosen forest configuration, a dashboard build's window, latest hour, hours by status, frames, site size, and
 elapsed time — so
 the workflow log for every scheduled run states what it did. Diagnostics go to stderr through
 `logging` at `--log-level`, including the resolved window before the run starts. The HTTP

@@ -134,7 +134,11 @@ def _kinds(frame: pd.DataFrame, shared_variance: float, residuals: pd.DataFrame 
         "z": (frame["z"], np.nan, np.nan),
         "z_total_raw": (frame["z_total_raw"].where(reproduced), np.nan, np.nan),
         "z_total": (z_total, np.nan, np.nan),
-        "z_total_shared": (_with_shared(frame, z_total, shared_variance), shared_variance, np.nan),
+        "z_total_shared": (
+            _with_shared(frame, z_total, shared_variance),
+            shared_variance,
+            shared_offset(residuals)[1] if residuals is not None else np.nan,
+        ),
     }
     if residuals is None:
         return kinds

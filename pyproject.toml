@@ -38,6 +38,7 @@ packages = ["src/aqdt"]
 analysis = [
     "matplotlib>=3.11.2",
     "scikit-learn>=1.9.1",
+    "shap>=0.51.0",
 ]
 dev = [
     "aws-sam-cli>=1.148.0",

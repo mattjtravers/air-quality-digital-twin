@@ -267,28 +267,44 @@ def _calibration_inputs(sensors: pd.DataFrame, rebuilt, stored_by_key, raw: bool
     return np.array(C), np.array(sigma2), keys, np.array(theta)
 
 
+_TARGET_CHUNK = 20_000
+
+
+def calibration_variance_at(
+    fit, sensors: pd.DataFrame, points: HourPoints, rebuilt, stored_by_key, tx, ty,
+    raw: bool = False,
+) -> np.ndarray:
+    """``λᵀ M Σ_s Mᵀ λ`` at each target ``(tx, ty)`` for the hour of ``fit``, with ``λ`` the
+    ordinary-kriging weights of its fixed variogram; NaN everywhere when a sensor's fit has no
+    covariance. Targets are solved a chunk at a time, so a whole grid fits in memory."""
+    tx, ty = np.atleast_1d(np.asarray(tx, dtype=float)), np.atleast_1d(np.asarray(ty, dtype=float))
+    inputs = _calibration_inputs(sensors, rebuilt, stored_by_key, raw)
+    if len(tx) == 0 or inputs is None:
+        return np.full(len(tx), np.nan)
+    C, sigma2, keys, _ = inputs
+    params = pykrige_parameters(fit.sill, fit.range_m, fit.nugget)
+    M = aggregation_matrix(sensors["x"], sensors["y"], points.x, points.y)
+    sigma = sensor_covariance(sensors["pm25_corrected_mean"], C, sigma2, keys)
+    out = np.empty(len(tx))
+    for k in range(0, len(tx), _TARGET_CHUNK):
+        part = slice(k, k + _TARGET_CHUNK)
+        lam = ok_weights(points.x, points.y, fit.variogram_model, params, tx[part], ty[part])
+        out[part] = cal_variance(lam, M, sigma)
+    return out
+
+
 # @spec EVAL-TOTVAR-001, EVAL-TOTVAR-002, EVAL-TOTVAR-003, EVAL-UNC-001
 def _cal_variance(context: _Hour, rebuilt, stored_by_key, raw: bool = False) -> np.ndarray:
-    n = len(context.monitors)
-    inputs = _calibration_inputs(context.sensors, rebuilt, stored_by_key, raw)
-    if n == 0 or inputs is None:
-        return np.full(n, np.nan)
-    C, sigma2, keys, _ = inputs
-    fit = context.fit
-    params = pykrige_parameters(fit.sill, fit.range_m, fit.nugget)
-    lam = ok_weights(
-        context.points.x,
-        context.points.y,
-        fit.variogram_model,
-        params,
+    return calibration_variance_at(
+        context.fit,
+        context.sensors,
+        context.points,
+        rebuilt,
+        stored_by_key,
         context.monitors["x"].to_numpy(),
         context.monitors["y"].to_numpy(),
+        raw,
     )
-    M = aggregation_matrix(
-        context.sensors["x"], context.sensors["y"], context.points.x, context.points.y
-    )
-    sigma = sensor_covariance(context.sensors["pm25_corrected_mean"], C, sigma2, keys)
-    return cal_variance(lam, M, sigma)
 
 
 # @spec EVAL-MC-001, EVAL-MC-002, EVAL-MC-003

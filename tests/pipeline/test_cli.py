@@ -48,6 +48,8 @@ def test_exactly_the_nine_sub_commands(env, stubs, tmp_path):
         ["fuse"],
         ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", str(tmp_path)],
         ["evaluate", "influence", "--hour", "2026-09-20T10", "--out", str(tmp_path)],
+        ["evaluate", "holdout", "--dev-start", "2026-10-01", "--dev-end", "2026-10-02",
+         "--test-start", "2026-10-02", "--test-end", "2026-10-03", "--out", str(tmp_path)],
         ["dashboard", "build", "--out", str(tmp_path / "site")],
     ):
         assert run(argv) == 0
@@ -467,6 +469,66 @@ def test_evaluate_influence_prints_its_summary(env, stubs, capsys, tmp_path):
     }
 
 
+HOLDOUT = [
+    "evaluate",
+    "holdout",
+    "--dev-start",
+    "2026-10-01T00:20-04:00",
+    "--dev-end",
+    "2026-10-25T17:00Z",
+    "--test-start",
+    "2026-10-26T00Z",
+    "--test-end",
+    "2026-11-16T00Z",
+]
+
+
+# @spec PIPE-CLI-019
+def test_evaluate_holdout_dispatch(env, stubs, monkeypatch, tmp_path):
+    from aqdt.evaluation.schemas import EvaluationSettings
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    monkeypatch.delenv("AQDT_EVAL_LOMO_HOURS", raising=False)
+    argv = [*HOLDOUT, "--out", str(tmp_path)]
+    assert run(argv) == 0
+    call = stubs.only("holdout")
+    archive_uri, dev, test, out, settings = call.args[:5]
+    assert archive_uri == ARCHIVE and str(out) == str(tmp_path)
+    assert dev == (datetime(2026, 10, 1, 4, tzinfo=UTC), datetime(2026, 10, 25, 17, tzinfo=UTC))
+    assert test == (datetime(2026, 10, 26, tzinfo=UTC), datetime(2026, 11, 16, tzinfo=UTC))
+    assert settings == EvaluationSettings()
+    assert call.kwargs == {"pack": False}
+    assert not [c for c in stubs.calls if c.name == "connect"]
+
+    stubs.calls.clear()
+    options = ["--mc-hours", "24", "--mc-draws", "500", "--lomo-hours", "24", "--seed", "3"]
+    assert run([*argv, *options, "--pack"]) == 0
+    call = stubs.only("holdout")
+    assert call.args[4] == EvaluationSettings(mc_hours=24, mc_draws=500, lomo_hours=24, seed=3)
+    assert call.kwargs == {"pack": True}
+    for bad in (
+        HOLDOUT,  # no --out
+        [*HOLDOUT[:-2], "--out", str(tmp_path)],  # no --test-end
+        [*argv, "--lomo-hours", "-1"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            run(bad)
+        assert exc.value.code == 2
+
+
+# @spec PIPE-OUT-010
+def test_evaluate_holdout_prints_its_summary(env, stubs, capsys, tmp_path):
+    assert run([*HOLDOUT, "--out", str(tmp_path)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {
+        "dev": {"start": "2026-10-01T00:00:00Z", "end": "2026-10-25T17:00:00Z"},
+        "test": {"start": "2026-10-26T00:00:00Z", "end": "2026-11-16T00:00:00Z"},
+        "out_dir": str(tmp_path),
+        "archive": None,
+        "rf_choice": {"n_estimators": 200, "min_samples_leaf": 5, "max_features": 0.5},
+    }
+
+
 # --- Dashboard ----------------------------------------------------------------
 
 
@@ -521,6 +583,8 @@ def test_dashboard_build_prints_its_summary(env, stubs, capsys, tmp_path):
         ["dashboard", "build", "--out", "SITE"],
         ["evaluate", "--start", "2026-09-20T10", "--end", "2026-09-20T12", "--out", "SITE"],
         ["evaluate", "influence", "--hour", "2026-09-20T10", "--out", "SITE"],
+        ["evaluate", "holdout", "--dev-start", "2026-10-01", "--dev-end", "2026-10-02",
+         "--test-start", "2026-10-02", "--test-end", "2026-10-03", "--out", "SITE"],
     ],
 )
 def test_analysis_commands_name_the_group_when_it_is_missing(

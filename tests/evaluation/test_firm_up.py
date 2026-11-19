@@ -259,6 +259,7 @@ def test_shared_offset_is_estimated_on_one_half_of_the_days_and_scored_on_the_ot
     assert odd_on_even["shared_variance"] == pytest.approx(4.0, rel=0.35)
     assert even_on_odd["shared_variance"] == 0.0
     assert odd_on_even["shared_hours"] == 60 and even_on_odd["shared_hours"] == 60
+    assert table.loc["z_total_shared", "shared_hours"] == 120  # the in-sample row's hours
     is_odd = pd.to_datetime(frame["hour"]).dt.day % 2 == 1
     assert odd_on_even["n"] == (~is_odd).sum() and even_on_odd["n"] == is_odd.sum()
     # σ² from the even days is 0, so the odd days score as z_total alone
