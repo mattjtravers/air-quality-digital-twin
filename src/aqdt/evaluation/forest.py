@@ -5,11 +5,16 @@ spread as an uncertainty, and SHAP attributions."""
 from __future__ import annotations
 
 import itertools
+import logging
+import resource
+import time
 
 import numpy as np
 import pandas as pd
 
 from aqdt.evaluation.baselines import FEATURES, features
+
+log = logging.getLogger(__name__)
 
 #: The grid searched, in report order.
 GRID = {
@@ -51,10 +56,13 @@ def n_folds(points: pd.DataFrame) -> int:
     return min(MAX_FOLDS, len(np.unique(_dates(points))))
 
 
-# @spec EVAL-HOLD-012, EVAL-HOLD-013
+# @spec EVAL-HOLD-012, EVAL-HOLD-013, EVAL-HOLD-024
 def grid_search(points: pd.DataFrame, seed: int, window: str) -> pd.DataFrame:
     """Each configuration's RMSE on every held-out fold of ``GroupKFold`` by UTC date over
-    ``points`` (``hour``, ``x``, ``y``, ``z``), its mean and SD over folds, and its rank."""
+    ``points`` (``hour``, ``x``, ``y``, ``z``), its mean and SD over folds, and its rank.
+
+    Each fold's forest is released before the next is fitted, so at most one is held at a time,
+    and one line is logged per configuration as it finishes."""
     from sklearn.model_selection import GroupKFold
 
     folds = n_folds(points)
@@ -66,13 +74,28 @@ def grid_search(points: pd.DataFrame, seed: int, window: str) -> pd.DataFrame:
     X = features(points, points)
     y = points["z"].to_numpy(dtype=float)
     splits = list(GroupKFold(n_splits=folds).split(X, y, groups=_dates(points)))
+    grid = configurations()
     rows = []
-    for config in configurations():
+    for k, config in enumerate(grid, start=1):
+        started = time.perf_counter()
         scores = []
         for train, held in splits:
             model = _model(config, seed).fit(X.iloc[train], y[train])
             predicted = model.set_params(n_jobs=1).predict(X.iloc[held])
+            del model
             scores.append(float(np.sqrt(np.mean((predicted - y[held]) ** 2))))
+        log.info(
+            "rf grid %d/%d: n_estimators=%d min_samples_leaf=%d max_features=%s: "
+            "mean RMSE %.3f in %.1f s, peak RSS %d MB",
+            k,
+            len(grid),
+            config["n_estimators"],
+            config["min_samples_leaf"],
+            config["max_features"],
+            float(np.mean(scores)),
+            time.perf_counter() - started,
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
+        )
         rows.append(
             {
                 **config,

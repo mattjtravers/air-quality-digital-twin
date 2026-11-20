@@ -986,6 +986,11 @@ on `D`'s kriging points only, then scored on `T`.
   scoring. A configuration's score is the RMSE over a fold's held-out
   points, averaged over folds. `rf_grid.csv` holds one row per configuration with each fold's RMSE,
   the mean and SD over folds, and its rank.
+- **Progress and memory.** The search logs one line per configuration as it finishes: its position
+  among the twelve, its settings, its mean fold RMSE, the seconds it took, and the process's peak
+  resident memory. Each fold's forest is released once its held-out points are scored and before
+  the next is fitted, so the search holds at most one fitted forest at a time; a 500-tree forest
+  with `min_samples_leaf = 1` on a development window's points takes a few gigabytes.
 - **Choice.** The configuration with the lowest mean RMSE; on a tie, the fewer trees, then the larger
   `min_samples_leaf`, then `max_features = 0.5`. It is refitted on all of `D`'s points.
 - **Prediction.** `rf_dev` at each `T` matchup from the monitor's `x`, `y`, UTC hour of day, and the
@@ -1118,6 +1123,7 @@ never evaluate, so their environments do not install them.
 | Forest tuning | Grid over trees, leaf size, and feature share, `GroupKFold` by UTC day on `D`, scored at held-out sensor points | Points of one hour share its level and points of one day its weather, so grouping by day is what keeps a fold's score out of sample; scoring at sensor points keeps the monitors, which `T` scores at, out of every choice. |
 | Forest uncertainty | Spread of the trees' predictions | It comes with the fitted forest at no cost and is the uncertainty a forest user would reach for first; scoring it beside kriging's variance shows how far it is from a predictive interval. |
 | Feature attribution | TreeExplainer SHAP on a seeded sample of `T`'s points | Exact for tree ensembles and additive per prediction, so the mean `|SHAP|` is in µg/m³ and the ranking reads as what the forest leans on in the test window. |
+| Forest fitting threads and memory | All cores (`n_jobs = -1`); one fitted forest held at a time | A forest's memory is its trees, which are kept whatever the thread count, so the thread count sets the search's speed and not its peak memory; releasing each fold's forest before the next fit keeps the peak to one forest. |
 | Figure format | matplotlib, 300 dpi, CSV beside each | Print-ready for papers and reports, and every number in a figure is recoverable without rerunning. |
 
 ## Open Questions & Future Decisions

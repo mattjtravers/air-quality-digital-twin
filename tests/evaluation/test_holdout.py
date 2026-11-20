@@ -463,6 +463,85 @@ def test_grid_search_needs_two_days():
         forest.grid_search(one_day, seed=0, window="[2026-09-14, 2026-09-15)")
 
 
+def _small_forests(monkeypatch, forest) -> list:
+    """Make every grid forest two trees, and record a weak reference to each as it is built."""
+    import weakref
+
+    built = []
+    real = forest._model
+
+    def small(config, seed):
+        model = real({**config, "n_estimators": 2}, seed)
+        built.append(weakref.ref(model))
+        return model
+
+    monkeypatch.setattr(forest, "_model", small)
+    return built
+
+
+def _two_day_points() -> pd.DataFrame:
+    rng = np.random.default_rng(2)
+    hours = pd.date_range("2026-09-14", periods=48, freq="h", tz="UTC")
+    points = pd.DataFrame(
+        {
+            "hour": np.repeat(hours, 5),
+            "x": rng.uniform(0, 1e4, 240),
+            "y": rng.uniform(0, 1e4, 240),
+        }
+    )
+    points["z"] = points["x"] / 1e3 + rng.normal(0, 0.5, 240)
+    return points
+
+
+# @spec EVAL-HOLD-024
+def test_grid_search_logs_each_configuration_as_it_finishes(monkeypatch, caplog):
+    import re
+
+    from aqdt.evaluation import forest
+
+    _small_forests(monkeypatch, forest)
+    with caplog.at_level("INFO", logger="aqdt.evaluation.forest"):
+        table = forest.grid_search(_two_day_points(), seed=0, window="[2026-09-14, 2026-09-16)")
+    lines = [r.getMessage() for r in caplog.records if r.name == "aqdt.evaluation.forest"]
+    pattern = re.compile(
+        r"rf grid (\d+)/12: n_estimators=(\d+) min_samples_leaf=(\d+) "
+        r"max_features=([\d.]+): mean RMSE ([\d.]+) in [\d.]+ s, peak RSS \d+ MB"
+    )
+    matches = [pattern.fullmatch(line) for line in lines]
+    assert len(lines) == 12 and all(matches), lines
+    for k, (match, config, (_, row)) in enumerate(
+        zip(matches, forest.configurations(), table.iterrows()), start=1
+    ):
+        assert int(match[1]) == k
+        assert (int(match[2]), int(match[3]), float(match[4])) == (
+            config["n_estimators"],
+            config["min_samples_leaf"],
+            config["max_features"],
+        )
+        assert float(match[5]) == pytest.approx(row["mean_rmse"], abs=5e-4)
+
+
+# @spec EVAL-HOLD-024
+def test_grid_search_holds_one_fitted_forest_at_a_time(monkeypatch):
+    import gc
+
+    from aqdt.evaluation import forest
+
+    built = _small_forests(monkeypatch, forest)
+    real = forest._model
+    live_at_each_build = []
+
+    def watched(config, seed):
+        gc.collect()
+        live_at_each_build.append(sum(ref() is not None for ref in built))
+        return real(config, seed)
+
+    monkeypatch.setattr(forest, "_model", watched)
+    forest.grid_search(_two_day_points(), seed=0, window="[2026-09-14, 2026-09-16)")
+    assert len(live_at_each_build) == 12 * forest.n_folds(_two_day_points())
+    assert max(live_at_each_build) == 0
+
+
 # @spec EVAL-HOLD-014
 def test_choice_breaks_ties_toward_the_simpler_forest():
     from aqdt.evaluation import forest
