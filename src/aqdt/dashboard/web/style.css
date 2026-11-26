@@ -135,3 +135,22 @@ a { color: var(--accent); overflow-wrap: anywhere; }
   font-size: 0.85rem;
 }
 .map-note[hidden] { display: none; }
+
+/* monitor history popup (DASH-WEB-020 to DASH-WEB-024): sized to fit a 360 px viewport */
+.monitor-history { width: 240px; max-width: calc(100vw - 150px); font-size: 0.85rem; }
+.monitor-history-name { margin: 0 0 4px; font-size: 0.95rem; }
+.history-chart { display: block; overflow: visible; }
+.history-chart text { font: 10px system-ui, sans-serif; fill: #505050; }
+.history-chart .map-line {
+  fill: none;
+  stroke: #1f4e8c;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.history-chart .obs { stroke: #111111; stroke-width: 1.2; }
+.history-chart .hour-marker { stroke: #c26a00; stroke-width: 1.5; stroke-dasharray: 3 2; }
+.monitor-history .history-legend { margin: 4px 0 0; color: var(--muted); }
+.history-legend .legend-obs { color: #111111; }
+.history-legend .legend-map { color: #1f4e8c; margin-left: 8px; }
+.monitor-history .history-stats { margin: 4px 0 0; }

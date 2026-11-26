@@ -85,9 +85,16 @@ def test_about_panel():
         "smooths toward the hour's average",
         "Faded",
         "map minus observed",
+        "from the interpolation alone",
+        "Oct 26 – Nov 15, 2026",
+        "calibration and an hour-wide shared error",
+        "about twice as large",
+        "about ±4 µg/m³ around the map value",
+        "history over the window",
     ):
         assert phrase in text, phrase
     assert "uncertainty" in text.lower() and "standard deviation" in text.lower()
+    assert "plausibly" not in text
 
 
 # @spec DASH-WEB-014
@@ -475,4 +482,240 @@ def test_a_sub_kilometre_range_puts_a_note_on_the_map(browser, degenerate, serve
     page.close()
     page, _ = _open(browser, served)
     assert not page.locator("#map-note").is_visible(), "the fixture's own ranges are over 1 km"
+    page.close()
+
+
+# --- Monitor history popup and the uncertainty note -------------------------------------------
+
+
+def _manifest(site) -> dict:
+    out, _ = site
+    return json.loads((out / "data" / "manifest.json").read_text())
+
+
+def _history(manifest: dict, site_id: str) -> list[dict | None]:
+    """The monitor's entry in every hour of the window, None where the hour does not list it."""
+    return [
+        next((m for m in hour["monitors"] if m["site_id"] == site_id), None)
+        for hour in manifest["hours"]
+    ]
+
+
+def _runs(values: list) -> list[int]:
+    """Lengths of the runs of consecutive non-null values."""
+    runs, length = [], 0
+    for value in values + [None]:
+        if value is None:
+            if length:
+                runs.append(length)
+            length = 0
+        else:
+            length += 1
+    return runs
+
+
+def _stats_text(manifest: dict, site_id: str) -> str:
+    history = _history(manifest, site_id)
+    diffs = [m["difference"] for m in history if m and m["difference"] is not None]
+    if not diffs:
+        return "Window: no hours with a map–monitor difference"
+    mean = sum(diffs) / len(diffs)
+    rmse = (sum(d * d for d in diffs) / len(diffs)) ** 0.5
+    return (
+        f"Last {len(manifest['hours'])} h: mean difference (map − observed) {_signed(mean)} µg/m³"
+        f" · RMSE {rmse:.1f} µg/m³ · n = {len(diffs)}"
+    )
+
+
+def _triangle(page, name: str):
+    return page.locator(f'.monitor-icon[aria-label="AirNow monitor {name}"]')
+
+
+def _history_popup(page):
+    return page.locator(".leaflet-popup-content .monitor-history")
+
+
+def _assert_closed(page):
+    """The popup leaves the page once Leaflet's fade-out ends."""
+    page.wait_for_selector(".monitor-history", state="detached", timeout=2_000)
+
+
+def _marker_index(page) -> int:
+    return int(_history_popup(page).locator(".hour-marker").get_attribute("data-index"))
+
+
+M2 = "airnow:840110010002"  # flagged at 11:00
+M5 = "airnow:840110010005"  # outside the grid: no map value, no difference
+
+
+# @spec DASH-TEST-002, DASH-WEB-020, DASH-WEB-021
+def test_monitor_popup_charts_observed_and_map_values_over_the_window(browser, served, site):
+    manifest = _manifest(site)
+    history = _history(manifest, M2)
+    name = next(m["name"] for m in history if m)
+    page, errors = _open(browser, served)
+    _triangle(page, name).click()
+    popup = _history_popup(page)
+    assert popup.is_visible()
+    assert popup.locator(".monitor-history-name").inner_text() == name
+
+    chart = popup.locator("svg.history-chart")
+    assert chart.get_attribute("role") == "img"
+    observed = [m for m in history if m and m["obs"] is not None]
+    assert chart.locator("circle.obs").count() == len(observed)
+    flagged = [m for m in observed if m["qc_flags"]]
+    assert flagged, "the fixture flags M2 at 11:00"
+    hollow = chart.locator("circle.obs.flagged")
+    assert hollow.count() == len(flagged)
+    assert all(
+        hollow.nth(i).get_attribute("fill") == "none" for i in range(hollow.count())
+    ), "flagged observations are hollow"
+    solid = chart.locator("circle.obs:not(.flagged)")
+    assert all(solid.nth(i).get_attribute("fill") != "none" for i in range(solid.count()))
+
+    # the map line breaks at every hour without a map value (gap hours included)
+    runs = _runs([m["map_value"] if m else None for m in history])
+    lines = chart.locator("polyline.map-line")
+    assert [len(lines.nth(i).get_attribute("points").split()) for i in range(lines.count())] == runs
+
+    hours = [h["hour"] for h in manifest["hours"]]
+    latest = hours.index(manifest["latest_hour"])
+    assert _marker_index(page) == latest
+
+    top = max(
+        v for m in history if m for v in (m["obs"], m["map_value"]) if v is not None
+    )
+    assert chart.locator(".y-min").text_content() == "0"
+    assert chart.locator(".y-max").text_content() == f"{top:.1f}"
+    assert chart.locator(".y-label").text_content() == "µg/m³"
+    # the window runs 6:00–11:00 AM EDT on one Eastern date
+    assert chart.locator(".x-start").text_content() == "Mon, Sep 14"
+    assert chart.locator(".x-end").text_content() == "Mon, Sep 14"
+    legend = popup.locator(".history-legend").inner_text()
+    assert "● observed" in legend and "— map" in legend
+    assert errors == []
+    page.close()
+
+
+# @spec DASH-WEB-021
+def test_the_history_chart_needs_no_library():
+    scripts = re.findall(r"<script[^>]*src=\"([^\"]+)\"", html())
+    assert scripts == [LEAFLET + "leaflet.min.js", "app.js"], scripts
+    assert "createElementNS" in script() or "<svg" in script()
+
+
+# @spec DASH-TEST-002, DASH-WEB-022
+def test_monitor_popup_states_the_window_mean_difference_rmse_and_n(browser, served, site):
+    manifest = _manifest(site)
+    page, _ = _open(browser, served)
+    for site_id in (M2, "airnow:840110010001", M5):
+        name = next(m["name"] for m in _history(manifest, site_id) if m)
+        _triangle(page, name).dispatch_event("click")  # M5 lies north of the map's view
+        stats = _history_popup(page).locator(".history-stats").inner_text()
+        assert stats == _stats_text(manifest, site_id), (site_id, stats)
+    assert "no hours with" in _stats_text(manifest, M5)
+    assert "Last 5 h" in _stats_text(manifest, M2)
+    page.close()
+
+
+# @spec DASH-TEST-002, DASH-WEB-023
+def test_monitor_popup_follows_the_hour_until_closed(browser, served, site):
+    manifest = _manifest(site)
+    name = next(m["name"] for m in _history(manifest, M2) if m)
+    page, errors = _open(browser, served)
+    _triangle(page, name).click()
+    stats = _history_popup(page).locator(".history-stats").inner_text()
+    start = _marker_index(page)
+
+    page.locator("#slider").focus()
+    page.keyboard.press("ArrowLeft")
+    assert _history_popup(page).is_visible(), "the popup stays open as the hour changes"
+    assert _marker_index(page) == start - 1
+    page.keyboard.press("End")  # a gap hour
+    assert _history_popup(page).is_visible()
+    assert _marker_index(page) == len(manifest["hours"]) - 1
+    assert _history_popup(page).locator(".history-stats").inner_text() == stats
+
+    page.locator("#play").click()  # playback loops to the first hour
+    page.wait_for_function(
+        "() => document.querySelector('.monitor-history .hour-marker')"
+        ".getAttribute('data-index') === '0'",
+        timeout=3_000,
+    )
+    page.locator("#play").click()
+    assert _history_popup(page).is_visible()
+
+    page.locator(".leaflet-popup-close-button").click()
+    _assert_closed(page)
+    _triangle(page, name).click()
+    # another popup (dispatched: the history popup may cover the sensor)
+    page.locator("path.sensor-marker").first.dispatch_event("click")
+    _assert_closed(page)
+    _triangle(page, name).click()
+    page.keyboard.press("Escape")
+    _assert_closed(page)
+    assert errors == []
+    page.close()
+
+
+# @spec DASH-TEST-002, DASH-WEB-024
+def test_monitor_triangles_take_the_keyboard_and_the_popup_is_labelled(browser, served, site):
+    manifest = _manifest(site)
+    names = {m["name"] for h in manifest["hours"] for m in h["monitors"]}
+    page, _ = _open(browser, served)
+    icons = page.locator(".monitor-icon")
+    assert icons.count() >= 4
+    for i in range(icons.count()):
+        icon = icons.nth(i)
+        assert icon.get_attribute("tabindex") == "0"
+        assert icon.get_attribute("role") == "button"
+        label = icon.get_attribute("aria-label")
+        assert label.startswith("AirNow monitor ") and label[len("AirNow monitor "):] in names
+
+    name = next(m["name"] for m in _history(manifest, M2) if m)
+    triangle = _triangle(page, name)
+    triangle.focus()
+    page.keyboard.press("Enter")
+    assert _history_popup(page).is_visible()
+    chart_name = _history_popup(page).locator("svg.history-chart").get_attribute("aria-label")
+    assert name in chart_name and "observed and map PM2.5" in chart_name
+    assert _stats_text(manifest, M2) in chart_name
+    page.keyboard.press("Escape")
+    _assert_closed(page)
+    assert page.evaluate("() => document.activeElement.getAttribute('aria-label')") == (
+        f"AirNow monitor {name}"
+    )
+    page.keyboard.press(" ")
+    assert _history_popup(page).is_visible(), "Space opens the popup too"
+    page.close()
+
+    page, _ = _open(browser, served, width=360, height=740)
+    _triangle(page, name).click()
+    page.wait_for_timeout(400)  # Leaflet pans the map to bring the popup into view
+    box = page.locator(".leaflet-popup").bounding_box()
+    assert box["x"] >= 0 and box["x"] + box["width"] <= 360, box
+    assert box["y"] >= 0 and box["y"] + box["height"] <= 740, box
+    page.close()
+
+
+UNCERTAINTY_NOTE = (
+    "Shading shows kriging uncertainty only. In testing, the full 95% range was about ±4 µg/m³ "
+    "(see About)."
+)
+
+
+# @spec DASH-TEST-002, DASH-WEB-025
+def test_uncertainty_view_says_the_shading_is_kriging_uncertainty_only(browser, served):
+    page, _ = _open(browser, served)
+    note = page.locator("#legend-uncertainty")
+    assert not note.is_visible()
+    page.locator("#kind-sd").click()
+    assert note.is_visible() and note.inner_text() == UNCERTAINTY_NOTE
+    page.locator("#slider").focus()
+    page.keyboard.press("End")  # a gap hour: the note is about the view, not the hour
+    assert note.is_visible()
+    page.locator("#kind-diff").click()
+    assert not note.is_visible()
+    page.locator("#kind-pm25").click()
+    assert not note.is_visible()
     page.close()

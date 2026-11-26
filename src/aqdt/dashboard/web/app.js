@@ -3,6 +3,7 @@
 // @spec DASH-WEB-001, DASH-WEB-002, DASH-WEB-003, DASH-WEB-004, DASH-WEB-005, DASH-WEB-006
 // @spec DASH-WEB-007, DASH-WEB-008, DASH-WEB-009, DASH-WEB-010, DASH-WEB-011
 // @spec DASH-WEB-014, DASH-WEB-015, DASH-WEB-016, DASH-WEB-017, DASH-WEB-018, DASH-WEB-019
+// @spec DASH-WEB-025
 (function () {
   "use strict";
 
@@ -93,9 +94,12 @@
     })[c]);
   }
 
-  const state = { manifest: null, index: 0, kind: "pm25", timer: null, preload: null };
-  let map, overlay, monitorLayer, sensorLayer, patternNote;
+  const state = {
+    manifest: null, index: 0, kind: "pm25", timer: null, preload: null, historySite: null,
+  };
+  let map, overlay, monitorLayer, sensorLayer, patternNote, historyPopup;
   let monitorMarkers = [];
+  let monitorMarkerById = {};
   const LABEL_SIDES = ["right", "left", "below", "above"];
 
   function triangleIcon(label) {
@@ -147,10 +151,122 @@
     });
   }
 
+  // --- Monitor history popup: the monitor's observed and map values over the whole window ---
+
+  // pad: the first and last hours sit clear of the axis and its tick labels
+  const CHART = { width: 280, height: 150, left: 34, right: 8, top: 10, bottom: 22, pad: 6 };
+
+  // the monitor's entry in every hour of the window, null where the hour does not list it
+  function monitorHistory(siteId) {
+    return state.manifest.hours.map(
+      (hour) => hour.monitors.find((m) => m.site_id === siteId) || null
+    );
+  }
+
+  function historyStats(history) {
+    const diffs = history
+      .filter((m) => m && m.difference !== null)
+      .map((m) => m.difference);
+    if (!diffs.length) return "Window: no hours with a map–monitor difference";
+    const mean = diffs.reduce((a, d) => a + d, 0) / diffs.length;
+    const rmse = Math.sqrt(diffs.reduce((a, d) => a + d * d, 0) / diffs.length);
+    return `Last ${history.length} h: mean difference (map − observed) ${signed(mean)} µg/m³` +
+      ` · RMSE ${rmse.toFixed(1)} µg/m³ · n = ${diffs.length}`;
+  }
+
+  function chartX(i, n) {
+    const width = CHART.width - CHART.left - CHART.right - 2 * CHART.pad;
+    return CHART.left + CHART.pad + (n > 1 ? (i * width) / (n - 1) : width / 2);
+  }
+
+  function historyChart(history, label) {
+    const n = history.length;
+    const { width, height, left, right, top, bottom } = CHART;
+    const values = history.flatMap((m) => (m ? [m.obs, m.map_value] : []))
+      .filter((v) => v !== null);
+    const top_value = values.length ? Math.max(...values) : 0;
+    const ymax = top_value > 0 ? top_value : 1;
+    const y = (v) => top + (height - top - bottom) * (1 - v / ymax);
+    const xy = (i, v) => `${chartX(i, n).toFixed(1)},${y(v).toFixed(1)}`;
+    const base = height - bottom;
+    const parts = [
+      `<svg class="history-chart" role="img" aria-label="${escapeHtml(label)}"` +
+        ` viewBox="0 0 ${width} ${height}" width="100%">`,
+      `<path d="M${left},${top}V${base}H${width - right}" fill="none" stroke="#909090"/>`,
+      `<text class="y-max" x="${left - 4}" y="${top + 4}" text-anchor="end">` +
+        `${top_value.toFixed(1)}</text>`,
+      `<text class="y-min" x="${left - 4}" y="${base + 4}" text-anchor="end">0</text>`,
+      `<text class="y-label" transform="translate(9 ${(top + base) / 2}) rotate(-90)"` +
+        ` text-anchor="middle">µg/m³</text>`,
+      `<text class="x-start" x="${left}" y="${height - 4}">` +
+        `${escapeHtml(easternDate.format(new Date(state.manifest.hours[0].hour)))}</text>`,
+      `<text class="x-end" x="${width - right}" y="${height - 4}" text-anchor="end">` +
+        `${escapeHtml(easternDate.format(new Date(state.manifest.hours[n - 1].hour)))}</text>`,
+    ];
+    // the map value as a line, broken wherever an hour has none
+    let run = [];
+    history.forEach((m, i) => {
+      if (m && m.map_value !== null) run.push(xy(i, m.map_value));
+      if ((!m || m.map_value === null || i === n - 1) && run.length) {
+        parts.push(`<polyline class="map-line" points="${run.join(" ")}"/>`);
+        run = [];
+      }
+    });
+    // the observed value as dots, hollow on a flagged hour, none where there is no value
+    history.forEach((m, i) => {
+      if (!m || m.obs === null) return;
+      const [cx, cy] = xy(i, m.obs).split(",");
+      parts.push(m.qc_flags.length
+        ? `<circle class="obs flagged" cx="${cx}" cy="${cy}" r="3" fill="none"/>`
+        : `<circle class="obs" cx="${cx}" cy="${cy}" r="3" fill="#111111"/>`);
+    });
+    const x = chartX(state.index, n).toFixed(1);
+    parts.push(
+      `<line class="hour-marker" data-index="${state.index}" x1="${x}" x2="${x}"` +
+        ` y1="${top}" y2="${base}"/>`,
+      "</svg>"
+    );
+    return parts.join("");
+  }
+
+  function historyContent(siteId) {
+    const history = monitorHistory(siteId);
+    const any = history.find((m) => m);
+    const name = any.name || siteId;
+    const stats = historyStats(history);
+    const label = `${name}: observed and map PM2.5 over the window. ${stats}`;
+    return `<div class="monitor-history">` +
+      `<h3 class="monitor-history-name">${escapeHtml(name)}</h3>` +
+      historyChart(history, label) +
+      `<p class="history-legend"><span class="legend-obs">● observed</span>` +
+      ` <span class="legend-map">— map</span></p>` +
+      `<p class="history-stats">${escapeHtml(stats)}</p></div>`;
+  }
+
+  // @spec DASH-WEB-020, DASH-WEB-021, DASH-WEB-022
+  function openHistory(siteId) {
+    const any = monitorHistory(siteId).find((m) => m);
+    state.historySite = siteId;
+    historyPopup.setLatLng([any.lat, any.lon]).setContent(historyContent(siteId));
+    if (!historyPopup.isOpen()) historyPopup.openOn(map);
+  }
+
+  // @spec DASH-WEB-023
+  // the chart describes the whole window; only its marker follows the hour shown
+  function moveHistoryMarker() {
+    if (!state.historySite || !historyPopup.isOpen()) return;
+    const marker = historyPopup.getElement().querySelector(".hour-marker");
+    const x = chartX(state.index, state.manifest.hours.length).toFixed(1);
+    marker.setAttribute("x1", x);
+    marker.setAttribute("x2", x);
+    marker.dataset.index = String(state.index);
+  }
+
   function drawPoints(hour) {
     monitorLayer.clearLayers();
     sensorLayer.clearLayers();
     monitorMarkers = [];
+    monitorMarkerById = {};
     for (const sensor of hour.sensors) {
       const value = sensor.pm25_calibrated === null
         ? "no calibrated value"
@@ -171,15 +287,28 @@
         )
         .addTo(sensorLayer);
     }
+    // @spec DASH-WEB-024
     for (const monitor of hour.monitors) {
       const name = monitor.name || monitor.site_id;
       const text = monitorLabel(monitor);
-      monitorMarkers.push(L.marker([monitor.lat, monitor.lon], {
+      // keyboard: Leaflet puts the triangle in the tab order as a button; Enter and Space open
+      // its popup below
+      const marker = L.marker([monitor.lat, monitor.lon], {
         icon: triangleIcon(text),
-        keyboard: false,
+        keyboard: true,
         title: `${name}: ${monitor.obs === null ? "no value" : text + " µg/m³"}`,
-        alt: `AirNow monitor ${name}`,
-      }).addTo(monitorLayer));
+      })
+        .on("click", () => openHistory(monitor.site_id))
+        .addTo(monitorLayer);
+      const icon = marker.getElement();
+      icon.setAttribute("aria-label", `AirNow monitor ${name}`);
+      icon.addEventListener("keydown", (event) => {
+        if (event.key !== " " && event.key !== "Enter") return;
+        event.preventDefault();
+        openHistory(monitor.site_id);
+      });
+      monitorMarkers.push(marker);
+      monitorMarkerById[monitor.site_id] = marker;
     }
     placeLabels();
   }
@@ -201,6 +330,7 @@
     el("legend-over").hidden = !over;
     el("legend-clipped").hidden = !(under || over);
     el("legend-faded").hidden = hour.status !== "kriged";
+    el("legend-uncertainty").hidden = state.kind !== "sd";
   }
 
   function caption(hour) {
@@ -255,6 +385,7 @@
     );
     drawLegend(hour);
     drawPoints(hour);
+    moveHistoryMarker();
   }
 
   function setKind(kind) {
@@ -346,6 +477,20 @@
     sensorLayer = L.layerGroup().addTo(map);
     monitorLayer = L.layerGroup().addTo(map);
     map.on("zoomend", placeLabels); // what is close on screen changes with the zoom
+    // the top-left padding keeps the popup clear of the zoom control when Leaflet pans to it
+    historyPopup = L.popup({
+      maxWidth: 280, minWidth: 200, autoPanPaddingTopLeft: [56, 8], className: "history-popup",
+    });
+    map.on("popupclose", (event) => {
+      if (event.popup === historyPopup) state.historySite = null;
+    });
+    // capture, so this runs before Leaflet's own Escape handling closes the popup
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !state.historySite) return;
+      const marker = monitorMarkerById[state.historySite];
+      map.closePopup(historyPopup);
+      if (marker && marker.getElement()) marker.getElement().focus();
+    }, true);
 
     const latestIndex = hours.findIndex((h) => h.hour === state.manifest.latest_hour);
     const framed = hours.find((h) => h.bounds_latlon) || hours[latestIndex];

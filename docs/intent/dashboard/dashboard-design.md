@@ -28,8 +28,9 @@ Principles:
 4. **Maps' scales.** Surfaces are coloured by Maps' colormaps and fixed limits, so a frame on the
    dashboard and the same hour in an evaluation figure read the same.
 5. **Precomputed, served static.** Everything the page shows is computed at build time and written
-   as files: images and one JSON manifest. The page fetches and draws; it computes nothing about
-   the data beyond choosing which frame to show.
+   as files: images and one JSON manifest. The page fetches and draws. Beyond choosing which frame
+   to show, it computes only plain summaries of values the manifest already carries, such as a
+   monitor's mean difference over the window, and never anything that needs the rasters.
 
 ## Build
 
@@ -260,7 +261,12 @@ gradient drawn from the active scale's `stops`, labelled with the scale's `min` 
 units, and its label; the Difference view's label is "Above / below this hour's average (µg/m³)".
 When the current frame passes a limit, the legend shows an arrow at that end (▲ at the top, ▼ at
 the bottom) and the text "values beyond the scale shown in its end colours". On a kriged hour
-the legend also says "Faded areas: far from sensors / high uncertainty".
+the legend also says "Faded areas: far from sensors / high uncertainty". In the Uncertainty view,
+on every hour, the legend adds: "Shading shows kriging uncertainty only. In testing, the full 95%
+range was about ±4 µg/m³ (see About)." The standard deviation drawn is kriging's alone, and
+evaluation's holdout test found the full uncertainty, which adds the calibration and an error
+shared by the whole hour, about twice as large; the note keeps the reader from taking the
+shading for the whole range of the estimate.
 
 **Pattern note.** On a kriged hour whose variogram range is under 1 km (`range_km < 1`), a small
 note on the map reads "Spatial pattern not detectable this hour; map ≈ hour average." Such a range
@@ -304,9 +310,44 @@ competes with the surface's colour scale.
   when no side is clear. Labels are placed one monitor at a time in manifest order, and placed
   afresh whenever the hour shown or the zoom changes, since both change what is close on screen
   and how wide each label is.
+- Clicking or tapping a monitor's triangle opens its *history popup* (below).
 - PurpleAir sensors are small hollow circles, drawn with a fully transparent fill so that the
   whole disc, not only its outline, takes a click or tap. Clicking or tapping one opens a popup
   with the sensor ID, the calibrated value (or "no calibrated value"), and the fit status.
+
+**Monitor history popup.** A monitor's popup shows how the map has tracked it over the whole
+window, so a reader can tell a one-hour miss from a lasting bias. Everything in it comes from
+the manifest's `monitors[]` entries for that `site_id` across `hours[]`:
+
+- A heading with the monitor's `name` (its `site_id` when the name is null).
+- A line chart in inline SVG, drawn by the page with no charting library. Its x axis spans every
+  hour of the window in order, gap hours included, labelled with the first and last hours' dates
+  in Eastern time. Its y axis runs from 0 to the largest value plotted, with `0` and that maximum
+  (one decimal) as its tick labels and `µg/m³` as its axis label. On it:
+  - the observed value (`obs`) as a dot at each hour, filled when `qc_flags` is empty and hollow
+    when it is not, and no dot where `obs` is null or the hour does not list the monitor;
+  - the map value (`map_value`) as a line through consecutive hours, broken wherever it is null
+    or the hour does not list the monitor, so a gap hour reads as a gap;
+  - a vertical marker at the hour currently shown.
+  A two-entry legend beside the chart reads "● observed" and "— map", so the chart explains
+  itself without the page around it.
+- Below the chart, `Last {N} h: mean difference (map − observed) {D} µg/m³ · RMSE {R} µg/m³ · n
+  = {n}`, with `N` the number of hours in the window (48 by default). The statistics run over the
+  hours whose `difference` is non-null, which excludes flagged and gap hours: `D` is the mean
+  difference, signed as the labels sign it, `R` the root mean square of the differences, both to
+  one decimal, and `n` the count of those hours. With no such hour the line reads `Window: no
+  hours with a map–monitor difference`.
+
+The popup stays open while the hour changes, by the slider or by playback, and its marker moves
+to the hour shown; the chart and statistics do not change, since they describe the whole
+window. It closes from its close button, by Escape, or when another popup opens.
+
+The triangles take the keyboard: each is in the tab order with the role of a button and the
+accessible name `AirNow monitor {name}`, and Enter or Space opens its popup. Escape closes the
+popup and returns focus to the triangle that opened it. The chart carries `role="img"` and an
+accessible name that states the monitor, that it plots observed and map values over the window,
+and the statistics line, so a screen reader hears what a sighted reader reads off the chart. The
+popup fits within a 360 px viewport, the chart scaling to the popup's width.
 
 **Freshness.** A line under the title reads `Latest hour 2:00 PM EST, updated 3:55 PM EST`,
 from `latest_hour` and `generated_at` in Eastern time, formatted as the hour label's times are. The page raises no alert about its age: an open page
@@ -318,20 +359,27 @@ that the twin has stopped. The freshness line gives the reader the hours to judg
   2021) and calibrated against AirNow monitors, then kriged hourly;
 - what the difference map shows: where the estimate is above (red) or below (blue) that hour's
   own average across the metro;
-- what the uncertainty map shows: the kriging standard deviation, which is lowest near sensors and
-  grows with distance from them;
+- what the uncertainty map shows: the kriging standard deviation, how far the estimate could be
+  from the true value from the interpolation alone, which is lowest near sensors and grows with
+  distance from them;
+- how large the full uncertainty is: independent testing (Oct 26 – Nov 15, 2026) found that the
+  full uncertainty, which also includes the calibration and an hour-wide shared error, is about
+  twice as large as the kriging standard deviation, and that a typical 95% range is about
+  ±4 µg/m³ around the map value;
 - what the nugget share means: the part of sensor-to-sensor variation the variogram treats as
   short-scale noise or measurement error (typical for low-cost sensors), so a high share means the
   map smooths toward the hour's average;
 - that faded areas are far from sensors or where the uncertainty is highest;
-- what the monitor labels show: observed, map value, and map minus observed;
+- what the monitor labels show: observed, map value, and map minus observed, and that selecting a
+  monitor shows its history over the window;
 - that AirNow data are preliminary and unvalidated;
 - that the page is a research prototype and not for regulatory or health decisions;
 - a link to the repository.
 
 **Accessibility.**
-- Every control is a native button or range input, operable from the keyboard with a visible
-  focus ring, and labelled for assistive technology.
+- Every control outside the map is a native button or range input, operable from the keyboard
+  with a visible focus ring, and labelled for assistive technology. On the map, the monitor
+  triangles take the keyboard as § Monitor history popup gives.
 - The overlay image carries alt text naming the kind and the hour, updated with each frame.
 - The layout is a single column at phone width (360 px), with the controls below the map and
   touch targets at least 44 px.
@@ -375,6 +423,8 @@ creation, because only this one test depends on it.
 | Markers | Hollow triangles (monitors) and hollow circles (sensors), no fill | On a coloured surface over a coloured basemap, a filled marker reads as a value on the scale. Outlines locate a site without competing with the surface. |
 | Monitor label | Observed value, map value, and their difference as text, `*` and no difference when flagged | The reference value is the number a reader compares the surface with, and the map value beside it makes the comparison without reading colours. The asterisk keeps a flagged hour visible without hiding the value (flag, never drop), and a flagged hour gives no difference to trust. |
 | Displayed time | Eastern time only, through `Intl` with `America/New_York`, 12-hour clock with the zone's abbreviation | The twin covers the D.C. metro, whose readers keep Eastern time; the archive and manifest stay in UTC, and the page converts only for display. `America/New_York` lets the browser handle daylight saving, and the abbreviation tells apart the two 1 AM hours of the autumn change. |
+| Monitor history | A popup per monitor charting observed and map values over the window, with the window's mean difference, RMSE, and n, computed in the page from the manifest | One hour's difference cannot tell a passing miss from a lasting bias; the window's series and its summary can. The manifest already carries every hour's observation, map value, and difference, so the page needs only arithmetic over values it already shows, and the statistics cannot drift from the chart drawn beside them. Inline SVG draws a few dozen points without adding a library to load and pin. |
+| Uncertainty note | Fixed text in the Uncertainty legend and the About panel, from evaluation's holdout run (`aqdt evaluate holdout`) over its test window of Oct 26 – Nov 15, 2026 | The Uncertainty view draws kriging's standard deviation, which holdout testing found to be about half the full uncertainty; without the note a reader would take the shading for the whole range. The full figure comes from an on-demand evaluation, not from each build, so the page states it as a tested result with its test window rather than as a property of the hour shown. |
 | Label placement | In the page, greedy over four sides of the triangle, redone on each hour and zoom | Whether two labels collide depends on the zoom and on each label's text, which only the page knows. Four fixed sides keep each label beside its own triangle, so no leader line is needed to tell which value belongs to which monitor; manifest order makes the placement the same on every load. |
 | Leaflet delivery | cdnjs, version-pinned with an SRI hash | No build step and no vendored library to update, and the integrity hash makes the pinned file the only one the browser will run. |
 | Basemap | OpenStreetMap standard tiles with attribution | Free, familiar, and openly licensed. The page's traffic is far inside the tile usage policy. |

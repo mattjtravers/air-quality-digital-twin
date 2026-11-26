@@ -38,6 +38,7 @@
         </div>
         <span id="legend-clipped" class="legend-clipped" hidden>values beyond the scale shown in its end colours</span>
         <span id="legend-faded" class="legend-faded" hidden>Faded areas: far from sensors / high uncertainty</span>
+        <span id="legend-uncertainty" class="legend-faded" hidden>Shading shows kriging uncertainty only. In testing, the full 95% range was about ±4 µg/m³ (see About).</span>
       </div>
 
       <div class="timeline">
@@ -74,10 +75,16 @@
       </p>
       <p>
         The uncertainty map shows the kriging standard deviation in µg/m³: how far the estimate
-        could plausibly be from the true value. It is lowest close to sensors and grows with
+        could be from the true value, from the interpolation alone. It is lowest close to sensors and grows with
         distance from them. Read the two maps together: where the uncertainty map is bright, the
         estimate there is less certain. Faded areas, on every view, are far from sensors (beyond the
         hour's variogram range) or where the uncertainty is highest.
+      </p>
+      <p>
+        Independent testing (Oct 26 – Nov 15, 2026) found that the full uncertainty, which also
+        includes the calibration and an hour-wide shared error, is about twice as large as the
+        kriging standard deviation, and that a typical 95% range is
+        about ±4 µg/m³ around the map value.
       </p>
       <p>
         The caption gives each hour's nugget share: the part of sensor-to-sensor variation the
@@ -87,7 +94,9 @@
       <p>
         Triangles mark AirNow reference monitors with their observed value for the hour, the map's
         value at the monitor, and in brackets the map minus observed. Monitors are not used to
-        build the surface, so they are an independent check on it. AirNow data are
+        build the surface, so they are an independent check on it. Select a monitor to see its
+        history over the window: observed and map values each hour, with the window's mean
+        difference and RMSE. AirNow data are
         preliminary and unvalidated, and may be revised.
       </p>
       <p>
